@@ -1,0 +1,151 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.get('email', '').lower() == "anandjhaxyz@gmail.com" ||
+        request.auth.token.get('email', '').lower() == "xtrowsnoida@gmail.com" ||
+        request.auth.token.get('email', '').lower() == "suhaibhusain7@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'super_admin')
+      );
+    }
+
+    function getUserData() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) 
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data 
+        : null;
+    }
+
+    function hasRole(requiredRole) {
+      return isSuperAdmin() || (
+        isAuthenticated() && getUserData() != null && (
+          getUserData().get('role', '') == 'super_admin' ||
+          (getUserData().get('status', '') == 'active' && (
+            requiredRole == 'active' ||
+            (requiredRole == 'sales' && (getUserData().get('role', '') == 'sales' || getUserData().get('role', '') == 'admin')) ||
+            (requiredRole == 'admin' && getUserData().get('role', '') == 'admin')
+          ))
+        )
+      );
+    }
+
+    function getEffectiveCompanyId() {
+      return isSuperAdmin() ? 'SUPER' : (
+        getUserData() != null 
+          ? (getUserData().get('role', '') == 'super_admin' ? 'SUPER' : getUserData().get('companyId', 'NONE')) 
+          : 'NONE'
+      );
+    }
+
+    function getAuthEmail() {
+      return request.auth.token.get('email', request.auth.get('email', '')).lower();
+    }
+
+    function getInvitationId() {
+      return 'invitation_' + getAuthEmail();
+    }
+
+    function hasInvitation() {
+      return exists(/databases/$(database)/documents/users/$(getInvitationId()));
+    }
+
+    // ===============================================================
+    // Global Rules
+    // ===============================================================
+    
+    match /{document=**} {
+      allow read, write: if isSuperAdmin();
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    match /companies/{companyId} {
+      allow read: if isAuthenticated() && (
+        isSuperAdmin() || 
+        (hasRole('active') && getEffectiveCompanyId() == companyId) ||
+        (resource.data.get('ownerEmail', '').lower() == getAuthEmail()) ||
+        (resource.data.get('ownerId', '') == request.auth.uid)
+      );
+      allow create: if isAuthenticated();
+      allow update: if hasRole('active') && (isSuperAdmin() || (hasRole('admin') && getEffectiveCompanyId() == companyId));
+      allow delete: if isSuperAdmin();
+    }
+
+    match /companyProfile/{profileId} {
+      allow read: if true; // Allow public read for quote display
+      allow create: if isAuthenticated();
+      allow update: if hasRole('active') && (isSuperAdmin() || (hasRole('admin') && getEffectiveCompanyId() == profileId));
+      allow delete: if isSuperAdmin();
+    }
+
+    match /clients/{clientId} {
+      allow read: if hasRole('active') && (isSuperAdmin() || getEffectiveCompanyId() == 'SUPER' || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+      allow create: if hasRole('sales') && (isSuperAdmin() || request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+      allow update: if hasRole('active') && (isSuperAdmin() || getEffectiveCompanyId() == 'SUPER' || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId()) && (isSuperAdmin() || request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+      allow delete: if hasRole('admin') && (isSuperAdmin() || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+    }
+
+    match /products/{productId} {
+      allow read: if hasRole('active') && (isSuperAdmin() || getEffectiveCompanyId() == 'SUPER' || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+      allow create, update: if hasRole('admin') && (isSuperAdmin() || request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+      allow delete: if hasRole('admin') && (isSuperAdmin() || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId());
+    }
+
+    match /quotations/{quotationId} {
+      allow read: if true; // Allow public read for sharing
+      allow create: if isSuperAdmin() || (hasRole('sales') && (getEffectiveCompanyId() == 'SUPER' || request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId()));
+      allow update: if isSuperAdmin() || (hasRole('active') && (getEffectiveCompanyId() == 'SUPER' || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId()));
+      allow delete: if isSuperAdmin() || (hasRole('admin') && (getEffectiveCompanyId() == 'SUPER' || resource.data.get('companyId', 'NONE') == getEffectiveCompanyId()));
+    }
+
+    match /counters/{counterId} {
+      allow read, write: if isSuperAdmin() || hasRole('active');
+    }
+
+    match /users/{userId} {
+      allow read: if (userId.startsWith('invitation_')) || (isAuthenticated() && (
+        request.auth.uid == userId || 
+        resource.data.get('email', '').lower() == getAuthEmail() ||
+        isSuperAdmin() || 
+        (hasRole('admin') && getEffectiveCompanyId() == resource.data.get('companyId', 'NONE'))
+      ));
+      allow create: if isAuthenticated() && (
+        (request.auth.uid == userId && request.resource.data.get('role', 'sales') != 'super_admin') || 
+        isSuperAdmin() || 
+        (hasRole('admin') && request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId() && request.resource.data.get('role', 'sales') != 'super_admin') ||
+        // Allow creating invitation
+        (userId.startsWith('invitation_') && hasRole('admin'))
+      );
+      allow update: if isSuperAdmin() || 
+                    (hasRole('admin') && 
+                     getEffectiveCompanyId() == resource.data.get('companyId', 'NONE') && 
+                     request.resource.data.get('companyId', 'NONE') == resource.data.get('companyId', 'NONE') &&
+                     resource.data.get('role', 'sales') != 'super_admin' &&
+                     request.resource.data.get('role', 'sales') != 'super_admin') ||
+                    // Allow user to update themselves if they are activating their account
+                    (request.auth.uid == userId && (
+                      resource.data.get('status', 'pending') == 'pending' ||
+                      resource.data.get('companyId', 'NONE') == 'NONE' ||
+                      hasInvitation()
+                    ) && request.resource.data.get('role', 'sales') != 'super_admin');
+      allow delete: if isSuperAdmin() || 
+                    (hasRole('admin') && getEffectiveCompanyId() == resource.data.get('companyId', 'NONE')) ||
+                    // Allow user to delete their own invitation
+                    (userId.startsWith('invitation_') && (userId == getInvitationId() || resource.data.get('email', '').lower() == getAuthEmail())) ||
+                    // Backward compatibility
+                    (resource.data.get('isPlaceholder', false) == true && resource.data.get('email', '').lower() == getAuthEmail());
+    }
+  }
+}

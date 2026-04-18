@@ -1,0 +1,160 @@
+{
+  "entities": {
+    "CompanyProfile": {
+      "title": "Company Profile",
+      "description": "Global company settings for quotations.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "logo": { "type": "string", "description": "Base64 logo image" },
+        "address": { "type": "string" },
+        "gstin": { "type": "string" },
+        "contactEmail": { "type": "string" },
+        "contactPhone": { "type": "string" },
+        "certifications": { "type": "array", "items": { "type": "string" } },
+        "bankDetails": { "type": "string" },
+        "stamp": { "type": "string", "description": "Base64 stamp image" },
+        "signature": { "type": "string", "description": "Base64 signature image" }
+      },
+      "required": ["name", "address", "gstin"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Client information for auto-fill.",
+      "type": "object",
+      "properties": {
+        "companyId": { "type": "string", "description": "ID of the business owner's company" },
+        "name": { "type": "string" },
+        "companyName": { "type": "string" },
+        "address": { "type": "string" },
+        "gstin": { "type": "string" },
+        "contactPerson": { "type": "string" },
+        "state": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["name", "companyName", "phone", "companyId"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Product templates with technical specifications.",
+      "type": "object",
+      "properties": {
+        "companyId": { "type": "string" },
+        "name": { "type": "string" },
+        "type": { "type": "string", "enum": ["LED", "Standee", "Kiosk", "Service"] },
+        "hsnCode": { "type": "string" },
+        "defaultRate": { "type": "number" },
+        "specifications": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": { "type": "string" },
+              "value": { "type": "string" }
+            }
+          }
+        },
+        "image": { "type": "string", "description": "Base64 product image" }
+      },
+      "required": ["name", "type", "companyId"]
+    },
+    "Quotation": {
+      "title": "Quotation",
+      "description": "Generated quotations.",
+      "type": "object",
+      "properties": {
+        "companyId": { "type": "string" },
+        "quoteNumber": { "type": "string" },
+        "date": { "type": "string" },
+        "clientId": { "type": "string" },
+        "clientDetails": { "$ref": "Client" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "productId": { "type": "string" },
+              "name": { "type": "string" },
+              "hsnCode": { "type": "string" },
+              "quantity": { "type": "number" },
+              "rate": { "type": "number" },
+              "amount": { "type": "number" },
+              "specifications": { "type": "array", "items": { "type": "object" } },
+              "image": { "type": "string" }
+            }
+          }
+        },
+        "subtotal": { "type": "number" },
+        "freight": { "type": "number" },
+        "installation": { "type": "number" },
+        "gstRate": { "type": "number", "description": "Default 18%" },
+        "gstAmount": { "type": "number" },
+        "roundOff": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "totalInWords": { "type": "string" },
+        "status": { "type": "string", "enum": ["Draft", "Sent", "Accepted", "Rejected"] },
+        "createdBy": { "type": "string", "description": "User UID" },
+        "revision": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["quoteNumber", "date", "items", "grandTotal", "companyId"]
+    },
+    "User": {
+      "title": "User",
+      "description": "User account information and subscription status.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["super_admin", "admin", "sales"] },
+        "companyId": { "type": "string", "description": "The company this user belongs to" },
+        "status": { "type": "string", "enum": ["pending", "active", "suspended", "expired"] },
+        "expiryDate": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "status"]
+    },
+    "Company": {
+      "title": "Company",
+      "description": "Business owner's company details.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "logo": { "type": "string" },
+        "address": { "type": "string" },
+        "gstin": { "type": "string" },
+        "contactEmail": { "type": "string" },
+        "contactPhone": { "type": "string" },
+        "bankDetails": { "type": "string" },
+        "ownerId": { "type": "string", "description": "UID of the business owner" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "ownerId"]
+    }
+  },
+  "firestore": {
+    "/companies/{companyId}": {
+      "schema": "Company",
+      "description": "Business owner's company settings."
+    },
+    "/clients/{clientId}": {
+      "schema": "Client",
+      "description": "Client database."
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Product templates."
+    },
+    "/quotations/{quotationId}": {
+      "schema": "Quotation",
+      "description": "Generated quotations."
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User accounts and subscription management."
+    }
+  }
+}

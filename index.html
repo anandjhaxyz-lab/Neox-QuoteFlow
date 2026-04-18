@@ -1,0 +1,79 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neoxe - Easy Quotations</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @media print {
+        /* Reset and hide all background UI */
+        body {
+          background-color: white !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+
+        /* Hide everything by default */
+        header, nav, .print-hidden, button {
+          display: none !important;
+        }
+
+        /* Reset layout containers */
+        #root, #root > div, main {
+          padding: 0 !important;
+          margin: 0 !important;
+          background: transparent !important;
+        }
+
+        #print-section {
+          position: static !important;
+          display: block !important;
+          width: 100% !important;
+          max-width: none !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          box-shadow: none !important;
+          border: none !important;
+        }
+
+        /* Ensure images and tables print well */
+        img {
+          max-width: 100% !important;
+        }
+        
+        table {
+          width: 100% !important;
+          border-collapse: collapse !important;
+        }
+
+        /* Page break controls */
+        tr {
+          page-break-inside: avoid !important;
+        }
+        
+        @page {
+          margin: 1.5cm;
+          size: A4;
+        }
+      }
+    </style>
+<script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/"
+  }
+}
+</script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="bg-gray-100 font-sans antialiased text-gray-800">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+</body>
+</html>
