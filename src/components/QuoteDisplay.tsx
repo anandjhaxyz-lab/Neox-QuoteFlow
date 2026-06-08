@@ -1,6 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Download, FileText, Printer, Share2, Mail, MapPin, Phone, Award, Package } from 'lucide-react';
 import { formatCurrency, cn } from '../lib/utils';
 import html2pdf from 'html2pdf.js';
@@ -33,6 +32,7 @@ interface QuoteDisplayProps {
     revision?: number;
     createdAt?: string;
     updatedAt?: string;
+    companyId?: string;
   };
 }
 
@@ -43,20 +43,23 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
   useEffect(() => {
     const fetchCompany = async () => {
       try {
-        const docSnap = await getDoc(doc(db, 'companyProfile', 'settings'));
-        if (docSnap.exists()) {
-          setCompany(docSnap.data());
-        } else {
-          setCompany({
-            name: 'Your Company Name',
-            address: 'Your Address',
-            contactPhone: '',
-            contactEmail: '',
-            gstin: '',
-            bankDetails: '',
-            certifications: []
-          });
+        const companyId = data.companyId || 'SUPER';
+        let profile = await localApi.getCompanyProfile(companyId);
+        const superProfile = await localApi.getCompanyProfile('SUPER');
+        
+        // Merge strategy: Use specific profile but fallback to SUPER for missing assets
+        const mergedProfile = {
+          ...(superProfile || {}),
+          ...(profile || {})
+        };
+
+        // Ensure we at least have basic fields if both are missing
+        if (!mergedProfile.name) {
+          mergedProfile.name = 'Your Company Name';
+          mergedProfile.address = 'Your Address';
         }
+        
+        setCompany(mergedProfile);
       } catch (error) {
         console.error("Error fetching company profile:", error);
         setCompany({
@@ -71,7 +74,7 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
       }
     };
     fetchCompany();
-  }, []);
+  }, [data.companyId]);
 
   const handleDownload = () => {
     const element = pdfRef.current;
@@ -151,7 +154,7 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
                   )}
                   <div>
                     <h1 className="text-xl font-black text-gray-900 uppercase tracking-tight">{company.name}</h1>
-                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mt-1">Digital Signage & LED Solutions</p>
+                    <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest mt-1">{company.tagline || 'Business Solutions'}</p>
                   </div>
                 </div>
                 <div className="text-right space-y-1">
@@ -198,27 +201,19 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
                     )}
                     <div className="flex justify-between items-center">
                       <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Date:</span>
-                      <span className="text-xs font-bold text-gray-900">{new Date(data.date).toLocaleDateString()}</span>
+                      <span className="text-xs font-bold text-gray-900">{new Date(data.date).toLocaleDateString('en-GB')}</span>
                     </div>
-                    {data.createdAt && (
-                      <div className="flex justify-between items-center">
-                        <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Created:</span>
-                        <span className="text-xs font-bold text-gray-900">
-                          {new Date(data.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
-                        </span>
-                      </div>
-                    )}
                     {data.updatedAt && data.revision !== undefined && data.revision > 0 && (
                       <div className="flex justify-between items-center">
                         <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Last Revised:</span>
                         <span className="text-xs font-bold text-gray-900">
-                          {new Date(data.updatedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                          {new Date(data.updatedAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}
                         </span>
                       </div>
                     )}
                     <div className="flex justify-between items-center">
                       <span className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Valid Until:</span>
-                      <span className="text-xs font-bold text-gray-900">{new Date(new Date(data.date).getTime() + 15 * 24 * 60 * 60 * 1000).toLocaleDateString()}</span>
+                      <span className="text-xs font-bold text-gray-900">{new Date(new Date(data.date).getTime() + 15 * 24 * 60 * 60 * 1000).toLocaleDateString('en-GB')}</span>
                     </div>
                   </div>
                 </div>
@@ -275,13 +270,21 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
                   </div>
                   <div className="space-y-2">
                     <h4 className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Terms & Conditions:</h4>
-                    <ul className="text-[9px] text-gray-500 space-y-0.5 list-disc pl-4 font-medium">
-                      <li>GST @ {data.gstRate}% extra as applicable.</li>
-                      <li>Freight and Installation charges are as mentioned.</li>
-                      <li>Delivery within 7-10 working days after PO.</li>
-                      <li>Payment: 50% Advance, 50% before dispatch.</li>
-                      <li>Warranty: 1 Year standard manufacturer warranty.</li>
-                    </ul>
+                    {(data.termsAndConditions || company.termsAndConditions) ? (
+                      <ul className="text-[9px] text-gray-500 space-y-0.5 list-disc pl-4 font-medium">
+                        {(data.termsAndConditions || company.termsAndConditions).split('\n').filter((t: string) => t.trim()).map((term: string, i: number) => (
+                          <li key={i}>{term}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <ul className="text-[9px] text-gray-500 space-y-0.5 list-disc pl-4 font-medium">
+                        <li>GST @ {data.gstRate}% extra as applicable.</li>
+                        <li>Freight and Installation charges are as mentioned.</li>
+                        <li>Delivery within 7-10 working days after PO.</li>
+                        <li>Payment: 50% Advance, 50% before dispatch.</li>
+                        <li>Warranty: 1 Year standard manufacturer warranty.</li>
+                      </ul>
+                    )}
                   </div>
                   <div className="pt-2">
                     <h4 className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Bank Details:</h4>
@@ -328,7 +331,7 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
                       {company.signature && <img src={company.signature} alt="Signature" className="h-12" />}
                     </div>
                     <div>
-                      <p className="text-[10px] font-black text-gray-900 uppercase">Authorized Signatory</p>
+                      <p className="text-[10px] font-black text-gray-900 uppercase">{company.signatoryTitle || 'Authorized Signatory'}</p>
                       <p className="text-[8px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">Sales & Operations</p>
                     </div>
                   </div>
@@ -405,7 +408,7 @@ const QuoteDisplay: React.FC<QuoteDisplayProps> = ({ id, data }) => {
                       <Award className="h-4 w-4 text-blue-600" />
                       Technical Specifications
                     </h4>
-                    <div className="grid grid-cols-2 gap-x-12 gap-y-4">
+                    <div className="grid grid-cols-3 gap-x-8 gap-y-4">
                       {item.specifications.map((spec: any, sIdx: number) => (
                         <div key={sIdx} className="flex justify-between items-center border-b border-gray-200 pb-2">
                           <span className="text-[10px] font-black text-gray-400 uppercase tracking-wider">{spec.label}</span>

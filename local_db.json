@@ -1,0 +1,45 @@
+{
+  "users": [
+    {
+      "id": "user_1776930256151",
+      "email": "anandjhaxyz@gmail.com",
+      "password": "879719274",
+      "displayName": "anand jha ",
+      "role": "super_admin",
+      "companyId": "comp_1776930256151",
+      "status": "active",
+      "createdAt": "2026-04-23T07:44:16.151Z"
+    }
+  ],
+  "companies": [
+    {
+      "id": "comp_1776930256151",
+      "name": "neox",
+      "plan": "free",
+      "status": "active",
+      "createdAt": "2026-04-23T07:44:16.151Z"
+    }
+  ],
+  "companyProfile": [
+    {
+      "id": "comp_1776930256151",
+      "name": "neox",
+      "address": "",
+      "certifications": []
+    },
+    {
+      "id": "SUPER",
+      "name": "neox",
+      "address": "kota",
+      "gstin": "12334568799",
+      "contactEmail": "",
+      "contactPhone": "",
+      "bankDetails": "",
+      "certifications": []
+    }
+  ],
+  "clients": [],
+  "products": [],
+  "quotations": [],
+  "counters": []
+}

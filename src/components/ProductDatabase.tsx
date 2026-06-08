@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, where } from 'firebase/firestore';
-import { db } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Plus, Search, Package, Edit2, Trash2, Tag, List, Image as ImageIcon, X, Copy, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { compressImage } from '../lib/imageUtils';
@@ -37,7 +36,6 @@ const ProductDatabase: React.FC<ProductDatabaseProps> = ({ userRole, companyId }
     name: '',
     type: 'LED',
     hsnCode: '',
-    defaultRate: 0,
     specifications: [],
     status: 'active'
   });
@@ -49,49 +47,41 @@ const ProductDatabase: React.FC<ProductDatabaseProps> = ({ userRole, companyId }
   const [productToDelete, setProductToDelete] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!companyId && userRole !== 'super_admin') return;
-
-    let q: any;
-    // Super admins and users in the 'SUPER' company see all products
-    if (companyId === 'SUPER') {
-      q = query(collection(db, 'products'), orderBy('name', 'asc'));
-    } else {
-      q = query(collection(db, 'products'), where('companyId', '==', companyId), orderBy('name', 'asc'));
+  const loadProducts = async () => {
+    if (!companyId && userRole !== 'super_admin') {
+      setLoading(false);
+      return;
     }
-
-    const unsubscribe = onSnapshot(q, (snapshot: any) => {
-      const productList = snapshot.docs.map((doc: any) => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Product[];
-      console.log(`Fetched ${productList.length} products for company: ${companyId}`);
-      setProducts(productList);
+    setLoading(true);
+    try {
+      const data = await localApi.getProducts(companyId || 'SUPER');
+      const safeData = Array.isArray(data) ? data : [];
+      setProducts(safeData);
       setLoading(false);
       setErrorMsg(null);
-    }, (error: any) => {
-      console.error('Error fetching products:', error);
+    } catch (error: any) {
+      setErrorMsg('Failed to load products');
       setLoading(false);
-      if (error.code === 'failed-precondition') {
-        setErrorMsg('This view requires a database index. Please contact the administrator to set it up.');
-      } else {
-        setErrorMsg('Failed to load products: ' + (error.message || 'Permission denied'));
-      }
-    });
+    }
+  };
 
-    return () => unsubscribe();
+  useEffect(() => {
+    loadProducts();
   }, [companyId, userRole]);
 
   useEffect(() => {
     if (userRole === 'super_admin') {
-      const unsubscribe = onSnapshot(collection(db, 'companies'), (snapshot) => {
-        const cMap: Record<string, string> = {};
-        snapshot.forEach(doc => {
-          cMap[doc.id] = doc.data().name || doc.id;
-        });
-        setCompaniesMap(cMap);
-      });
-      return () => unsubscribe();
+      const fetchCompanies = async () => {
+        try {
+          const companies = await localApi.getCompanies();
+          const cMap: Record<string, string> = {};
+          companies.forEach((c: any) => {
+            cMap[c.id] = c.name || c.id;
+          });
+          setCompaniesMap(cMap);
+        } catch (err) {}
+      };
+      fetchCompanies();
     }
   }, [userRole]);
 
@@ -138,24 +128,24 @@ const ProductDatabase: React.FC<ProductDatabaseProps> = ({ userRole, companyId }
     try {
       const cleanData: any = { 
         ...formData,
-        status: formData.status || 'active'
+        defaultRate: formData.defaultRate || 0,
+        status: formData.status || 'active',
+        companyId
       };
       if (cleanData.image === undefined) delete cleanData.image;
 
       if (editingProduct) {
-        await updateDoc(doc(db, 'products', editingProduct.id), cleanData);
+        await localApi.updateProduct(editingProduct.id, cleanData);
       } else {
-        await addDoc(collection(db, 'products'), {
-          ...cleanData,
-          companyId
-        });
+        await localApi.createProduct(cleanData);
       }
+      
+      await loadProducts();
       setIsModalOpen(false);
       setEditingProduct(null);
-      setFormData({ name: '', type: 'LED', hsnCode: '', defaultRate: 0, specifications: [] });
+      setFormData({ name: '', type: 'LED', hsnCode: '', specifications: [] });
     } catch (error: any) {
-      console.error('Save failed:', error);
-      setErrorMsg('Failed to save product: ' + (error.message || 'Permission denied'));
+      setErrorMsg('Failed to save product');
     }
   };
 
@@ -166,11 +156,11 @@ const ProductDatabase: React.FC<ProductDatabaseProps> = ({ userRole, companyId }
   const confirmDelete = async () => {
     if (productToDelete) {
       try {
-        await deleteDoc(doc(db, 'products', productToDelete));
+        await localApi.deleteProduct(productToDelete);
+        await loadProducts();
         setProductToDelete(null);
       } catch (error: any) {
-        console.error('Delete failed:', error);
-        setErrorMsg('Failed to delete product: ' + (error.message || 'Permission denied'));
+        setErrorMsg('Failed to delete product');
       }
     }
   };
@@ -469,8 +459,9 @@ const ProductDatabase: React.FC<ProductDatabaseProps> = ({ userRole, companyId }
                   <label className="text-sm font-bold text-gray-700">Default Rate (₹)</label>
                   <input
                     type="number"
-                    value={formData.defaultRate}
-                    onChange={(e) => setFormData({ ...formData, defaultRate: Number(e.target.value) })}
+                    value={formData.defaultRate ?? ''}
+                    onChange={(e) => setFormData({ ...formData, defaultRate: e.target.value ? Number(e.target.value) : undefined })}
+                    placeholder="0"
                     className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
                   />
                 </div>

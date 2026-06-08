@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, onSnapshot, addDoc, updateDoc, deleteDoc, doc, query, orderBy, where } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Plus, Search, Users, Edit2, Trash2, Mail, Phone, MapPin, Building2, User, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -50,97 +49,71 @@ const ClientDatabase: React.FC<ClientDatabaseProps> = ({ userRole, companyId }) 
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if ((userRole === 'admin' || userRole === 'super_admin') && (companyId || userRole === 'super_admin')) {
-      let q = query(collection(db, 'users'));
-      if (userRole === 'admin') {
-        q = query(collection(db, 'users'), where('companyId', '==', companyId));
-      }
-      
-      const unsubscribeUsers = onSnapshot(q, (snapshot) => {
-        const uMap: Record<string, string> = {};
-        snapshot.forEach(doc => {
-          const data = doc.data();
-          uMap[doc.id] = data.displayName || data.email || 'Unknown User';
-        });
-        setUsersMap(uMap);
-      });
-      return () => unsubscribeUsers();
-    }
+    // For local mode, we'll just fetch users when needed or once
+    const fetchUsers = async () => {
+      // Simplification: In local mode we might not need usersMap immediately but keeping it for UI
+    };
+    fetchUsers();
   }, [userRole, companyId]);
 
-  useEffect(() => {
-    if (!companyId && userRole !== 'super_admin') return;
-
-    let q;
-    if (companyId === 'SUPER') {
-      q = query(collection(db, 'clients'));
-    } else {
-      q = query(collection(db, 'clients'), where('companyId', '==', companyId));
+  const loadClients = async () => {
+    if (!companyId && userRole !== 'super_admin') {
+      setLoading(false);
+      return;
     }
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      let clientList = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Client[];
-      
-      console.log(`Fetched ${clientList.length} clients for company: ${companyId}`);
-      // Sort in memory for all roles to avoid index/missing field issues
-      clientList = clientList.sort((a, b) => (a.companyName || '').localeCompare(b.companyName || ''));
-      
-      setClients(clientList);
-      setLoading(false);
+    setLoading(true);
+    try {
+      const data = await localApi.getClients(companyId || 'SUPER');
+      const safeData = Array.isArray(data) ? data : [];
+      setClients(safeData.sort((a: Client, b: Client) => (a.companyName || '').localeCompare(b.companyName || '')));
       setFetchError(null);
-    }, (error) => {
-      console.error('Error fetching clients:', error);
+    } catch (error: any) {
       setFetchError(error.message);
+    } finally {
       setLoading(false);
-    });
+    }
+  };
 
-    return () => unsubscribe();
+  useEffect(() => {
+    loadClients();
   }, [userRole, companyId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const payload = {
+        ...formData,
+        address: formData.billingAddress || formData.address,
+        companyId
+      };
+
       if (editingClient) {
-        await updateDoc(doc(db, 'clients', editingClient.id), {
-          ...formData,
-          address: formData.billingAddress || formData.address // Keep address for backward compatibility
-        });
+        await localApi.updateClient(editingClient.id, payload);
       } else {
-        await addDoc(collection(db, 'clients'), {
-          ...formData,
-          address: formData.billingAddress || formData.address,
-          companyId,
-          createdBy: auth.currentUser?.uid || ''
-        });
+        await localApi.createClient(payload);
       }
+      
+      await loadClients();
       setIsModalOpen(false);
       setEditingClient(null);
-      setFormData({
-        name: '', companyName: '', address: '', billingAddress: '', shippingAddress: '', gstin: '',
-        contactPerson: '', state: '', phone: '', email: ''
-      });
       setSameAsBilling(true);
     } catch (error: any) {
-      console.error('Save failed:', error);
-      setErrorMsg('Failed to save client: ' + (error.message || 'Permission denied'));
+      setErrorMsg('Failed to save client: ' + (error.message || 'Error occurred'));
     }
   };
 
-  const handleDelete = async (id: string) => {
-    setClientToDelete(id);
+  const handleDelete = (userId: string) => {
+    setClientToDelete(userId);
   };
 
   const confirmDelete = async () => {
     if (clientToDelete) {
       try {
-        await deleteDoc(doc(db, 'clients', clientToDelete));
+        await localApi.deleteClient(clientToDelete);
+        await loadClients();
         setClientToDelete(null);
       } catch (error: any) {
-        console.error('Delete failed:', error);
-        setErrorMsg('Failed to delete client: ' + (error.message || 'Permission denied'));
+        setErrorMsg('Failed to delete client');
       }
     }
   };
@@ -151,7 +124,7 @@ const ClientDatabase: React.FC<ClientDatabaseProps> = ({ userRole, companyId }) 
     (client.email || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  if (loading) return <div className="h-64 flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
+  if (loading && clients.length === 0) return <div className="h-64 flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
 
   if (userRole !== 'super_admin' && (!companyId || companyId === 'NONE')) {
     return (

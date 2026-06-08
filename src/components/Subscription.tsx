@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { doc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import { localApi } from '../services/localApi';
 import { CreditCard, CheckCircle2, AlertTriangle, Calendar, ShieldCheck, Zap, Crown } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -20,17 +19,23 @@ const Subscription: React.FC<SubscriptionProps> = ({ companyId }) => {
   const [company, setCompany] = useState<CompanyData | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const loadData = async () => {
     if (!companyId) return;
-
-    const unsubscribe = onSnapshot(doc(db, 'companies', companyId), (doc) => {
-      if (doc.exists()) {
-        setCompany({ id: doc.id, ...doc.data() } as CompanyData);
+    setLoading(true);
+    try {
+      const data = await localApi.getCompanyProfile(companyId);
+      if (data) {
+        setCompany(data as CompanyData);
       }
+    } catch (err) {
+      console.error('Failed to load subscription data:', err);
+    } finally {
       setLoading(false);
-    });
+    }
+  };
 
-    return () => unsubscribe();
+  useEffect(() => {
+    loadData();
   }, [companyId]);
 
   if (loading) return <div className="h-64 flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;

@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Save, Building2, Mail, Phone, MapPin, CreditCard, Award, Image as ImageIcon, CheckCircle2, X, Loader2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { compressImage } from '../lib/imageUtils';
 
 interface CompanyProfileData {
   name: string;
+  tagline?: string;
   logo?: string;
   address: string;
   gstin: string;
@@ -14,6 +14,8 @@ interface CompanyProfileData {
   contactPhone: string;
   certifications: string[];
   bankDetails: string;
+  termsAndConditions: string;
+  signatoryTitle?: string;
   stamp?: string;
   signature?: string;
 }
@@ -31,7 +33,8 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
     contactEmail: '',
     contactPhone: '',
     certifications: [],
-    bankDetails: ''
+    bankDetails: '',
+    termsAndConditions: ''
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -39,51 +42,57 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
   const [showSuccess, setShowSuccess] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadData = async () => {
     if (!companyId) {
       setLoading(false);
       return;
     }
-    const unsubscribe = onSnapshot(doc(db, 'companies', companyId), (doc) => {
-      if (doc.exists()) {
-        const data = doc.data();
+    setLoading(true);
+    try {
+      const data = await localApi.getCompanyProfile(companyId);
+      if (data) {
+        let certs = data.certifications || [];
+        if (typeof certs === 'string') {
+          try {
+            certs = JSON.parse(certs);
+          } catch (e) {
+            certs = [];
+          }
+        }
+        if (!Array.isArray(certs)) certs = [];
+
         setProfile({
           name: data.name || '',
+          tagline: data.tagline || 'Business Solutions',
           address: data.address || '',
           gstin: data.gstin || '',
           contactEmail: data.contactEmail || '',
           contactPhone: data.contactPhone || '',
-          certifications: data.certifications || [],
+          certifications: certs,
           bankDetails: data.bankDetails || '',
+          termsAndConditions: data.termsAndConditions || '',
+          signatoryTitle: data.signatoryTitle || 'Authorized Signatory',
           logo: data.logo,
           stamp: data.stamp,
           signature: data.signature
         });
         setErrorMsg(null);
       } else {
-        console.warn('Company profile not found for ID:', companyId);
         if (userRole === 'super_admin') {
-          setErrorMsg('Company profile not found for ID: ' + companyId + '. You can create it by filling the details below and saving.');
-          setProfile({
-            name: '',
-            address: '',
-            gstin: '',
-            contactEmail: '',
-            contactPhone: '',
-            certifications: [],
-            bankDetails: ''
-          });
+          setErrorMsg('Company profile not found. You can create it by filling details below.');
         } else {
-          setErrorMsg('Company profile not found. Please ensure your company is correctly set up.');
+          setErrorMsg('Company profile not found.');
         }
       }
+    } catch (error) {
+      console.error('Failed to load company profile:', error);
+    } finally {
       setLoading(false);
-    }, (error) => {
-      console.error('Error fetching company profile:', error);
-      setLoading(false);
-    });
+    }
+  };
 
-    return () => unsubscribe();
+  useEffect(() => {
+    loadData();
   }, [companyId]);
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>, field: keyof CompanyProfileData) => {
@@ -94,10 +103,22 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
       reader.onloadend = async () => {
         try {
           const compressed = await compressImage(reader.result as string);
-          setProfile({ ...profile, [field]: compressed });
+          setProfile(prev => {
+            const updated = { ...prev, [field]: compressed };
+            if (companyId) {
+              localApi.updateCompanyProfile(companyId, updated).then(() => {
+                setShowSuccess(true);
+                setTimeout(() => setShowSuccess(false), 3000);
+              }).catch(err => {
+                console.error(`Auto-save failed for ${field}:`, err);
+                setErrorMsg(`Auto-save failed for ${field}. Please try saving using the button at the bottom.`);
+              });
+            }
+            return updated;
+          });
         } catch (error) {
           console.error('Image compression failed:', error);
-          setErrorMsg(`Failed to process ${field}. Please try a different image.`);
+          setErrorMsg(`Failed to process ${field}.`);
         } finally {
           setImageLoading(prev => ({ ...prev, [field]: false }));
         }
@@ -111,33 +132,13 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
     setSaving(true);
     setErrorMsg(null);
     try {
-      const cleanProfile: any = { ...profile };
-      if (cleanProfile.logo === undefined) delete cleanProfile.logo;
-      if (cleanProfile.stamp === undefined) delete cleanProfile.stamp;
-      if (cleanProfile.signature === undefined) delete cleanProfile.signature;
-
       if (companyId) {
-        await setDoc(doc(db, 'companies', companyId), cleanProfile, { merge: true });
+        await localApi.updateCompanyProfile(companyId, profile);
         setShowSuccess(true);
         setTimeout(() => setShowSuccess(false), 3000);
-      } else {
-        throw new Error('No Company ID found. Please contact support.');
       }
     } catch (error: any) {
-      console.error('Save failed:', error);
-      const errInfo = {
-        error: error.message || String(error),
-        operationType: 'write',
-        path: `companies/${companyId}`,
-        authInfo: {
-          userId: auth.currentUser?.uid,
-          email: auth.currentUser?.email,
-          role: userRole,
-          companyId: companyId
-        }
-      };
-      console.error('Firestore Error Info:', JSON.stringify(errInfo));
-      setErrorMsg('Failed to save Company Profile: ' + (error.message || 'Permission denied'));
+      setErrorMsg('Failed to save Company Profile');
     } finally {
       setSaving(false);
     }
@@ -194,6 +195,17 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
                   disabled={userRole !== 'admin' && userRole !== 'super_admin'}
                   value={profile.name}
                   onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-gray-50 disabled:text-gray-500"
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">Business Tagline (Quote Subtitle)</label>
+                <input
+                  type="text"
+                  disabled={userRole !== 'admin' && userRole !== 'super_admin'}
+                  placeholder="e.g. Digital Signage & LED Solutions"
+                  value={profile.tagline}
+                  onChange={(e) => setProfile({ ...profile, tagline: e.target.value })}
                   className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none disabled:bg-gray-50 disabled:text-gray-500"
                 />
               </div>
@@ -363,6 +375,28 @@ const CompanyProfile: React.FC<CompanyProfileProps> = ({ userRole, companyId }) 
                 placeholder="ISO 9001:2015&#10;CE Certified&#10;RoHS Compliant"
                 value={profile.certifications.join('\n')}
                 onChange={(e) => setProfile({ ...profile, certifications: e.target.value.split('\n').filter(s => s.trim()) })}
+                className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none disabled:bg-gray-50 disabled:text-gray-500"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-bold text-gray-700">Authorized Signatory Title</label>
+              <input
+                type="text"
+                disabled={userRole !== 'admin' && userRole !== 'super_admin'}
+                placeholder="Authorized Signatory"
+                value={profile.signatoryTitle}
+                onChange={(e) => setProfile({ ...profile, signatoryTitle: e.target.value })}
+                className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none placeholder:text-gray-300 disabled:bg-gray-50 disabled:text-gray-500"
+              />
+            </div>
+            <div className="md:col-span-2 space-y-2">
+              <label className="text-sm font-bold text-gray-700">Terms & Conditions (One per line)</label>
+              <textarea
+                rows={6}
+                disabled={userRole !== 'admin' && userRole !== 'super_admin'}
+                placeholder="GST @ 18% extra as applicable.&#10;Warranty: 1 Year..."
+                value={profile.termsAndConditions}
+                onChange={(e) => setProfile({ ...profile, termsAndConditions: e.target.value })}
                 className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none disabled:bg-gray-50 disabled:text-gray-500"
               />
             </div>

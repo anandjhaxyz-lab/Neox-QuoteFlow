@@ -1,5 +1,6 @@
 {
-  "name": "QuoteFlow",
+  "name": "QuoteFlow Neox",
   "description": "Professional Quotation Management System for LED & Digital Signage businesses with PDF generation, client database, and smart pricing.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

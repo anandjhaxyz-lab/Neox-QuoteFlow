@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, onSnapshot, addDoc, updateDoc, doc, getDoc, getDocs, orderBy, where, runTransaction, limit } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { 
   Plus, Trash2, Save, Download, X, Search, User, Building2, 
   Package, ChevronDown, ChevronUp, Calculator, FileText, 
-  Eye, ArrowLeft, PlusCircle, Settings2, MapPin
+  Eye, ArrowLeft, PlusCircle, Settings2, MapPin, Loader2, Image as ImageIcon
 } from 'lucide-react';
-import { cn, formatCurrency, numberToWords, handleFirestoreError, OperationType } from '../lib/utils';
+import { cn, formatCurrency, numberToWords } from '../lib/utils';
+import { compressImage } from '../lib/imageUtils';
 import QuoteDisplay from './QuoteDisplay';
 
 interface Specification {
@@ -83,6 +83,7 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
   const [revision, setRevision] = useState(0);
   const [createdAt, setCreatedAt] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [createdBy, setCreatedBy] = useState<string>('');
 
   // UI State
   const [clientSearch, setClientSearch] = useState('');
@@ -93,11 +94,24 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
   const clientDropdownRef = useRef<HTMLDivElement>(null);
   const productDropdownRef = useRef<HTMLDivElement>(null);
 
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  // Quick Add State - Clients
+  const [showAddClientModal, setShowAddClientModal] = useState(false);
+  const [clientFormData, setClientFormData] = useState<Partial<Client>>({
+    name: '', companyName: '', address: '', billingAddress: '', shippingAddress: '', gstin: '',
+    state: '', phone: '', email: ''
+  });
+  const [sameAsBilling, setSameAsBilling] = useState(true);
 
-  useEffect(() => {
-    console.log(`Clients count: ${clients.length}, Products count: ${products.length}`);
-  }, [clients, products]);
+  // Quick Add State - Products
+  const [showAddProductModal, setShowAddProductModal] = useState(false);
+  const [productFormData, setProductFormData] = useState<Partial<Product>>({
+    name: '', type: 'LED', hsnCode: '', specifications: []
+  });
+  const [isImageLoading, setIsImageLoading] = useState(false);
+
+  const [termsAndConditions, setTermsAndConditions] = useState('');
+
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -113,58 +127,67 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  const loadData = async () => {
+    if (!companyId && userRole !== 'super_admin') return;
+
+    try {
+      const [clientsData, productsData, quotesData] = await Promise.all([
+        localApi.getClients(companyId || 'SUPER'),
+        localApi.getProducts(companyId || 'SUPER'),
+        localApi.getQuotations(companyId || 'SUPER')
+      ]);
+      setClients(clientsData.sort((a: any, b: any) => (a.companyName || '').localeCompare(b.companyName || '')));
+      setProducts(productsData.sort((a: any, b: any) => (a.name || '').localeCompare(b.name || '')));
+
+      if (!quoteId) {
+        // Auto-generate next quote number
+        if (Array.isArray(quotesData) && quotesData.length > 0) {
+          const sorted = [...quotesData].sort((a: any, b: any) => {
+            const aTime = new Date(a.createdAt || a.date || 0).getTime();
+            const bTime = new Date(b.createdAt || b.date || 0).getTime();
+            return bTime - aTime;
+          });
+          const lastQuote = sorted[0];
+          const lastNumStr = lastQuote.quoteNumber;
+          if (lastNumStr) {
+            const regex = /(\d+)(?!.*\d)/;
+            const match = lastNumStr.match(regex);
+            if (match) {
+              const numStr = match[1];
+              const numVal = parseInt(numStr, 10);
+              const nextVal = numVal + 1;
+              const paddedNext = String(nextVal).padStart(numStr.length, '0');
+              const lastIndex = lastNumStr.lastIndexOf(numStr);
+              if (lastIndex !== -1) {
+                const generated = lastNumStr.substring(0, lastIndex) + paddedNext + lastNumStr.substring(lastIndex + numStr.length);
+                setQuoteNumber(generated);
+              } else {
+                setQuoteNumber(`QT-${nextVal}`);
+              }
+            } else {
+              setQuoteNumber(lastNumStr + ' - 1');
+            }
+          } else {
+            setQuoteNumber('QT-1001');
+          }
+        } else {
+          setQuoteNumber('QT-1001');
+        }
+      }
+    } catch (error: any) {
+      setFetchError(error.message);
+    }
+  };
+
   useEffect(() => {
-    console.log('QuoteBuilder useEffect triggered:', { userRole, companyId, quoteId });
-    if (!companyId && userRole !== 'super_admin') {
-      console.log('QuoteBuilder: Missing companyId and not super_admin, skipping fetch');
-      return;
-    }
-
-    // Load Clients
-    let clientsQuery;
-    if (userRole === 'super_admin' || companyId === 'SUPER') {
-      clientsQuery = query(collection(db, 'clients'));
-    } else {
-      clientsQuery = query(collection(db, 'clients'), where('companyId', '==', companyId));
-    }
-
-    const unsubscribeClients = onSnapshot(clientsQuery, (snapshot) => {
-      let clientList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Client[];
-      clientList = clientList.sort((a, b) => (a.companyName || '').localeCompare(b.companyName || ''));
-      console.log(`QuoteBuilder: Fetched ${clientList.length} clients. UserRole: ${userRole}, CompanyId: ${companyId}`);
-      setClients(clientList);
-      setFetchError(null);
-    }, (error) => {
-      console.error('QuoteBuilder: Error fetching clients:', error);
-      setFetchError(error.message);
-    });
-
-    // Load Products
-    let productsQuery;
-    if (userRole === 'super_admin' || companyId === 'SUPER') {
-      productsQuery = query(collection(db, 'products'), orderBy('name'));
-    } else {
-      productsQuery = query(collection(db, 'products'), where('companyId', '==', companyId), orderBy('name'));
-    }
-
-    const unsubscribeProducts = onSnapshot(productsQuery, (snapshot) => {
-      const productList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as Product[];
-      console.log(`QuoteBuilder: Fetched ${productList.length} products. UserRole: ${userRole}, CompanyId: ${companyId}`);
-      setProducts(productList);
-      setFetchError(null);
-    }, (error) => {
-      console.error('QuoteBuilder: Error fetching products:', error);
-      setFetchError(error.message);
-    });
-
+    loadData();
+    
     // Load Existing Quote if editing
     if (quoteId) {
       const loadQuote = async () => {
         try {
-          const docRef = doc(db, 'quotations', quoteId);
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) {
-            const data = docSnap.data();
+          const data = await localApi.getQuotation(quoteId);
+          if (data) {
             setQuoteNumber(data.quoteNumber);
             setDate(data.date);
             setSelectedClient(data.clientDetails);
@@ -177,11 +200,12 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
             setStatus(data.status);
             setPaymentStatus(data.paymentStatus || 'Unpaid');
             setRevision(data.revision || 0);
+            setTermsAndConditions(data.termsAndConditions || '');
             setCreatedAt(data.createdAt || null);
             setUpdatedAt(data.updatedAt || null);
+            setCreatedBy(data.createdBy || '');
           }
         } catch (error: any) {
-          console.error("Error loading quote:", error);
           setFetchError(error.message);
         } finally {
           setLoading(false);
@@ -189,50 +213,23 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
       };
       loadQuote();
     } else {
-      // Generate sequential quote number using a counter document
-      const generateQuoteNumber = async () => {
+      // Set logged-in user as creator
+      setCreatedBy(localStorage.getItem('localUserId') || '');
+      // Load Company Profile for default T&C
+      const fetchProfileData = async () => {
         try {
-          console.log('Generating quote number for companyId:', companyId);
-          const counterRef = doc(db, 'counters', `${companyId}_quotations`);
-          const counterDoc = await getDoc(counterRef);
-          
-          let nextNumber = 101; // Starting number as requested
-          
-          if (counterDoc.exists()) {
-            nextNumber = Math.max(101, (counterDoc.data().lastNumber || 100) + 1);
-            console.log('Found existing counter:', nextNumber);
-          } else {
-            // Double check if there are any existing quotes to avoid duplicates if counter was deleted
-            const q = query(collection(db, 'quotations'), where('companyId', '==', companyId), orderBy('quoteNumber', 'desc'), limit(1));
-            const querySnapshot = await getDocs(q);
-            if (!querySnapshot.empty) {
-              const lastQuote = querySnapshot.docs[0].data().quoteNumber;
-              const lastNum = parseInt(lastQuote.split('-')[1]);
-              if (!isNaN(lastNum)) {
-                nextNumber = Math.max(101, lastNum + 1);
-              }
-            }
-            console.log('No existing counter found, starting at:', nextNumber);
+          const profile = await localApi.getCompanyProfile(companyId || 'SUPER');
+          if (profile) {
+            setTermsAndConditions(profile.termsAndConditions || '');
           }
-          
-          setQuoteNumber(`Q-${nextNumber}`);
-        } catch (error: any) {
-          console.error("Error generating quote number:", error);
-          // Fallback to 101 if it's a new company or permission error, 
-          // but don't use random numbers anymore as per user request
-          setQuoteNumber(`Q-101`);
+        } catch (error) {
+          console.error("Failed to load company profile for T&C:", error);
         } finally {
           setLoading(false);
         }
       };
-      
-      generateQuoteNumber();
+      fetchProfileData();
     }
-
-    return () => {
-      unsubscribeClients();
-      unsubscribeProducts();
-    };
   }, [quoteId, userRole, companyId]);
 
   // Calculations
@@ -321,66 +318,82 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
       totalInWords,
       status,
       paymentStatus,
+      termsAndConditions,
       revision: quoteId ? revision + 1 : 0,
-      createdBy: auth.currentUser?.uid || '',
-      updatedAt: new Date().toISOString()
+      createdBy: createdBy || localStorage.getItem('localUserId') || 'Unknown'
     };
 
     try {
       if (quoteId) {
-        try {
-          console.log('Updating existing quote:', quoteId, 'for companyId:', companyId);
-          await updateDoc(doc(db, 'quotations', quoteId), quoteData);
-        } catch (error) {
-          handleFirestoreError(error, OperationType.UPDATE, `quotations/${quoteId}`);
-        }
+        await localApi.updateQuotation(quoteId, quoteData);
       } else {
-        // Use a transaction to safely increment the counter and create the quote
-        try {
-          console.log('Creating new quote for companyId:', companyId, 'with current quoteNumber:', quoteNumber);
-          await runTransaction(db, async (transaction) => {
-            const counterRef = doc(db, 'counters', `${companyId}_quotations`);
-            console.log('Fetching counter from:', counterRef.path);
-            const counterDoc = await transaction.get(counterRef);
-            
-            let nextNumber = 101;
-            if (counterDoc.exists()) {
-              nextNumber = Math.max(101, (counterDoc.data().lastNumber || 100) + 1);
-            }
-            
-            console.log('Next quote number will be:', nextNumber);
-            const finalQuoteNumber = `Q-${nextNumber}`;
-            
-            // Update the counter
-            transaction.set(counterRef, { lastNumber: nextNumber }, { merge: true });
-            
-            // Create the quote
-            const newQuoteRef = doc(collection(db, 'quotations'));
-            console.log('Setting new quote at:', newQuoteRef.path);
-            transaction.set(newQuoteRef, {
-              ...quoteData,
-              quoteNumber: finalQuoteNumber,
-              createdAt: new Date().toISOString()
-            });
-          });
-        } catch (error) {
-          console.error('Transaction failed:', error);
-          handleFirestoreError(error, OperationType.WRITE, 'quotations/transaction');
-        }
+        await localApi.createQuotation(quoteData);
       }
       onClose();
     } catch (error: any) {
-      console.error('Save failed:', error);
-      let displayError = error.message || 'Permission denied';
-      try {
-        const parsed = JSON.parse(error.message);
-        if (parsed.error) displayError = parsed.error;
-      } catch (e) {
-        // Not a JSON error
-      }
-      setErrorMsg('Failed to save quotation: ' + displayError);
+      setErrorMsg('Failed to save quotation');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const dataToSave = {
+        ...productFormData,
+        defaultRate: productFormData.defaultRate || 0,
+        companyId,
+        status: 'active'
+      };
+      const created = await localApi.createProduct(dataToSave);
+      handleAddItem(created);
+      await loadData();
+      setShowAddProductModal(false);
+      setProductFormData({ name: '', type: 'LED', hsnCode: '', specifications: [] });
+    } catch (error: any) {
+      setErrorMsg('Failed to add product');
+    }
+  };
+
+  const handleSaveClient = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const created = await localApi.createClient({
+        ...clientFormData,
+        address: clientFormData.billingAddress || clientFormData.address,
+        companyId
+      });
+      setSelectedClient(created);
+      setBillingAddress(created.billingAddress || created.address);
+      setShippingAddress(created.shippingAddress || created.address);
+      await loadData();
+      setShowAddClientModal(false);
+      setClientFormData({
+        name: '', companyName: '', address: '', billingAddress: '', shippingAddress: '', gstin: '',
+        state: '', phone: '', email: ''
+      });
+    } catch (error: any) {
+      setErrorMsg('Failed to add client');
+    }
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setIsImageLoading(true);
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        try {
+          const compressed = await compressImage(reader.result as string);
+          setProductFormData({ ...productFormData, image: compressed });
+        } catch (error) {
+          console.error('Image compression failed:', error);
+        } finally {
+          setIsImageLoading(false);
+        }
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -413,6 +426,7 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
         <QuoteDisplay 
           id={quoteId || undefined}
           data={{
+            companyId: companyId || undefined,
             quoteNumber, date, clientDetails: selectedClient!, items, 
             subtotal, freight, installation, gstRate, gstAmount, 
             roundOff, grandTotal, totalInWords,
@@ -497,8 +511,20 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
                 
                   {showClientDropdown && (
                     <div
-                      className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-100 max-h-60 overflow-y-auto"
+                      className="absolute z-50 w-full mt-2 bg-white rounded-xl shadow-2xl border border-gray-100 max-h-80 overflow-y-auto"
                     >
+                      <div className="p-2 border-b border-gray-50 flex justify-center">
+                        <button
+                          onClick={() => {
+                            setClientFormData(prev => ({ ...prev, companyName: clientSearch }));
+                            setShowAddClientModal(true);
+                            setShowClientDropdown(false);
+                          }}
+                          className="w-full flex items-center justify-center gap-2 py-2 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg text-xs font-bold transition-colors"
+                        >
+                          <PlusCircle className="h-4 w-4" /> Add "{clientSearch || 'New Client'}"
+                        </button>
+                      </div>
                       {clients.length === 0 ? (
                         <div className="px-4 py-8 text-sm text-gray-500 text-center flex flex-col items-center gap-2">
                           <User className="h-8 w-8 text-gray-200" />
@@ -677,7 +703,19 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
                           />
                         </div>
                       </div>
-                      <div className="max-h-60 overflow-y-auto">
+                      <div className="max-h-80 overflow-y-auto">
+                        <div className="p-2 border-b border-gray-50">
+                          <button
+                             onClick={() => {
+                              setProductFormData(prev => ({ ...prev, name: productSearch }));
+                              setShowAddProductModal(true);
+                              setShowProductDropdown(false);
+                            }}
+                            className="w-full flex items-center justify-center gap-2 py-2 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg text-xs font-bold transition-colors"
+                          >
+                            <PlusCircle className="h-4 w-4" /> Add "{productSearch || 'New Product'}"
+                          </button>
+                        </div>
                         {products.length === 0 ? (
                           <div className="px-4 py-8 text-sm text-gray-500 text-center flex flex-col items-center gap-2">
                             <Package className="h-8 w-8 text-gray-200" />
@@ -923,8 +961,154 @@ const QuoteBuilder: React.FC<QuoteBuilderProps> = ({ quoteId, viewOnly, onClose,
               </div>
             </div>
           </div>
+
+          {/* Terms & Conditions Editor */}
+          <div className="bg-white p-8 rounded-2xl border border-gray-100 shadow-sm space-y-4">
+            <div className="flex items-center gap-2 border-b border-gray-50 pb-4">
+              <FileText className="h-5 w-5 text-gray-600" />
+              <h2 className="font-bold text-gray-900 text-lg">Terms & Conditions</h2>
+            </div>
+            <textarea
+              rows={6}
+              value={termsAndConditions}
+              onChange={(e) => setTermsAndConditions(e.target.value)}
+              placeholder="Enter terms and conditions here (one per line)..."
+              className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium leading-relaxed resize-none"
+            />
+            <p className="text-[10px] text-gray-400 italic">This will appear at the bottom of the quotation.</p>
+          </div>
         </div>
       </div>
+      {/* Quick Add Client Modal */}
+      {showAddClientModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+              <h2 className="text-xl font-bold text-gray-900">Quick Add Client</h2>
+              <button onClick={() => setShowAddClientModal(false)} className="p-2 hover:bg-gray-200 rounded-full"><X className="h-6 w-6" /></button>
+            </div>
+            <form onSubmit={handleSaveClient} className="p-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">Company Name *</label>
+                <input required type="text" value={clientFormData.companyName} onChange={(e) => setClientFormData({ ...clientFormData, companyName: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">Contact Person *</label>
+                <input required type="text" value={clientFormData.name} onChange={(e) => setClientFormData({ ...clientFormData, name: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">Phone *</label>
+                <input required type="tel" value={clientFormData.phone} onChange={(e) => setClientFormData({ ...clientFormData, phone: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-bold text-gray-700">Email</label>
+                <input type="email" value={clientFormData.email} onChange={(e) => setClientFormData({ ...clientFormData, email: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+              </div>
+              <div className="md:col-span-2 space-y-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-gray-700">Billing Address *</label>
+                  <textarea required rows={2} value={clientFormData.billingAddress || clientFormData.address} onChange={(e) => {
+                    const val = e.target.value;
+                    setClientFormData(prev => ({ ...prev, billingAddress: val, shippingAddress: sameAsBilling ? val : prev.shippingAddress }));
+                  }} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                </div>
+                {!sameAsBilling && (
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-gray-700">Shipping Address *</label>
+                    <textarea required rows={2} value={clientFormData.shippingAddress} onChange={(e) => setClientFormData({ ...clientFormData, shippingAddress: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none resize-none" />
+                  </div>
+                )}
+              </div>
+              <div className="md:col-span-2 flex gap-4 pt-4">
+                <button type="submit" className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700">Save Client</button>
+                <button type="button" onClick={() => setShowAddClientModal(false)} className="flex-1 bg-gray-100 text-gray-600 py-3 rounded-xl font-bold">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Add Product Modal */}
+      {showAddProductModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col animate-in zoom-in-95 duration-200">
+            <div className="px-8 py-6 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+              <h2 className="text-xl font-bold text-gray-900">Quick Add Product</h2>
+              <button onClick={() => setShowAddProductModal(false)} className="p-2 hover:bg-gray-200 rounded-full"><X className="h-6 w-6" /></button>
+            </div>
+            <form onSubmit={handleSaveProduct} className="p-8 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-gray-700">Product Name *</label>
+                  <input required type="text" value={productFormData.name} onChange={(e) => setProductFormData({ ...productFormData, name: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-gray-700">Type *</label>
+                    <select value={productFormData.type} onChange={(e) => setProductFormData({ ...productFormData, type: e.target.value as any })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none">
+                      <option value="LED">LED Display</option>
+                      <option value="Standee">Digital Standee</option>
+                      <option value="Kiosk">Kiosk</option>
+                      <option value="Service">Service</option>
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-gray-700">HSN Code</label>
+                    <input type="text" value={productFormData.hsnCode} onChange={(e) => setProductFormData({ ...productFormData, hsnCode: e.target.value })} className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-gray-700">Default Rate (₹)</label>
+                  <input type="number" value={productFormData.defaultRate ?? ''} onChange={(e) => setProductFormData({ ...productFormData, defaultRate: e.target.value ? Number(e.target.value) : undefined })} placeholder="0" className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm font-bold text-gray-700">Product Image</label>
+                  <div className="flex items-center gap-4">
+                    <div className="h-20 w-20 rounded-xl border-2 border-dashed border-gray-200 flex items-center justify-center overflow-hidden bg-gray-50">
+                      {isImageLoading ? <Loader2 className="h-6 w-6 text-blue-500 animate-spin" /> : productFormData.image ? <img src={productFormData.image} className="w-full h-full object-cover" /> : <ImageIcon className="h-6 w-6 text-gray-300" />}
+                    </div>
+                    <label className="cursor-pointer bg-white border border-gray-200 px-4 py-2 rounded-xl text-xs font-bold hover:bg-gray-50 transition-all">
+                      {isImageLoading ? 'Processing...' : 'Upload Image'}
+                      <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={isImageLoading} />
+                    </label>
+                  </div>
+                </div>
+              </div>
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="text-sm font-bold text-gray-700">Specifications</label>
+                  <button type="button" onClick={() => setProductFormData({ ...productFormData, specifications: [...(productFormData.specifications || []), { label: '', value: '' }] })} className="text-blue-600 text-xs font-bold flex items-center gap-1"><Plus className="h-3 w-3" /> Add</button>
+                </div>
+                <div className="space-y-2">
+                  {productFormData.specifications?.map((spec, i) => (
+                    <div key={i} className="flex gap-2">
+                      <input placeholder="Label" value={spec.label} onChange={(e) => {
+                        const newSpecs = [...(productFormData.specifications || [])];
+                        newSpecs[i].label = e.target.value;
+                        setProductFormData({ ...productFormData, specifications: newSpecs });
+                      }} className="flex-1 px-3 py-1.5 rounded-lg border border-gray-200 text-sm" />
+                      <input placeholder="Value" value={spec.value} onChange={(e) => {
+                        const newSpecs = [...(productFormData.specifications || [])];
+                        newSpecs[i].value = e.target.value;
+                        setProductFormData({ ...productFormData, specifications: newSpecs });
+                      }} className="flex-1 px-3 py-1.5 rounded-lg border border-gray-200 text-sm" />
+                      <button type="button" onClick={() => {
+                        const newSpecs = [...(productFormData.specifications || [])];
+                        newSpecs.splice(i, 1);
+                        setProductFormData({ ...productFormData, specifications: newSpecs });
+                      }} className="text-gray-400 hover:text-red-500"><X className="h-4 w-4" /></button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="md:col-span-2 pt-6 flex gap-4">
+                <button type="submit" className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-100">Add Product</button>
+                <button type="button" onClick={() => setShowAddProductModal(false)} className="flex-1 bg-gray-100 text-gray-600 py-3 rounded-xl font-bold">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

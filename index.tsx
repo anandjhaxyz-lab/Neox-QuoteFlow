@@ -3,6 +3,10 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './src/App';
 import './globals.css';
+import { registerSW } from 'virtual:pwa-register';
+
+// Register service worker
+registerSW({ immediate: true });
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {

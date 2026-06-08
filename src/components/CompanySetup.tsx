@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Building2, ArrowRight, CheckCircle2, Loader2 } from 'lucide-react';
 
 interface CompanySetupProps {
@@ -14,76 +13,48 @@ const CompanySetup: React.FC<CompanySetupProps> = ({ onComplete }) => {
 
   const handleSetup = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!auth.currentUser) return;
-    
     setLoading(true);
-    const user = auth.currentUser;
-    const companyId = companyName.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + Math.random().toString(36).substring(2, 7);
-
+    
     try {
-      // 1. Create company document
-      try {
-        await setDoc(doc(db, 'companies', companyId), {
-          name: companyName,
-          createdAt: serverTimestamp(),
-          ownerId: user.uid,
-          ownerEmail: user.email,
-          status: 'active',
-          plan: 'free'
-        });
-      } catch (error) {
-        console.error('Error creating company:', error);
-        throw new Error(JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-          operationType: 'write',
-          path: `companies/${companyId}`,
-          authInfo: { userId: user.uid, email: user.email }
-        }));
-      }
+      const user = await localApi.getCurrentUser();
+      if (!user) throw new Error('Not authenticated');
+
+      const companyId = companyName.toLowerCase().replace(/[^a-z0-9]/g, '-') + '-' + Math.random().toString(36).substring(2, 7);
+
+      // 1. Create company
+      await localApi.createCompany({
+        id: companyId,
+        name: companyName,
+        createdAt: new Date().toISOString(),
+        ownerId: user.id,
+        ownerEmail: user.email,
+        status: 'active',
+        plan: 'free'
+      });
 
       // 2. Create company profile
-      try {
-        await setDoc(doc(db, 'companyProfile', companyId), {
-          name: companyName,
-          address: '',
-          gstin: '',
-          contactEmail: user.email,
-          contactPhone: '',
-          bankDetails: '',
-          certifications: []
-        });
-      } catch (error) {
-        console.error('Error creating company profile:', error);
-        throw new Error(JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-          operationType: 'write',
-          path: `companyProfile/${companyId}`,
-          authInfo: { userId: user.uid, email: user.email }
-        }));
-      }
+      await localApi.updateCompanyProfile(companyId, {
+        name: companyName,
+        address: '',
+        gstin: '',
+        contactEmail: user.email || '',
+        contactPhone: '',
+        bankDetails: '',
+        certifications: []
+      });
 
-      // 3. Update user document
-      try {
-        await setDoc(doc(db, 'users', user.uid), {
-          companyId: companyId,
-          role: 'admin',
-          status: 'active'
-        }, { merge: true });
-      } catch (error) {
-        console.error('Error updating user:', error);
-        throw new Error(JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-          operationType: 'write',
-          path: `users/${user.uid}`,
-          authInfo: { userId: user.uid, email: user.email }
-        }));
-      }
+      // 3. Update user to link company
+      await localApi.updateUser(user.id, {
+        companyId: companyId,
+        role: 'admin',
+        status: 'active'
+      });
 
       setSuccess(true);
       setTimeout(() => onComplete(companyId), 1500);
     } catch (err) {
       console.error('Setup failed:', err);
-      alert('Workspace creation failed. Please try again.');
+      alert('Workspace creation failed.');
     } finally {
       setLoading(false);
     }
@@ -150,7 +121,10 @@ const CompanySetup: React.FC<CompanySetupProps> = ({ onComplete }) => {
 
         <div className="mt-8 pt-8 border-t border-gray-100 text-center">
           <button 
-            onClick={() => auth.signOut()}
+            onClick={() => {
+              localStorage.removeItem('user');
+              window.location.reload();
+            }}
             className="text-sm font-bold text-gray-400 hover:text-red-600 transition-colors"
           >
             Sign out and try another account

@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, onSnapshot, doc, setDoc, updateDoc, deleteDoc, serverTimestamp, getDocs, where } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Building2, Plus, Trash2, ExternalLink, Search, Globe, Mail, Phone, Edit2, X } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -47,21 +46,21 @@ const CompanyManagement: React.FC<CompanyManagementProps> = ({ userRole, onManag
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadCompanies = async () => {
     if (userRole !== 'super_admin') return;
+    setLoading(true);
+    try {
+      const data = await localApi.getCompanies();
+      setCompanies(data);
+    } catch (err) {
+      console.error('Failed to load companies:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const q = query(collection(db, 'companies'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      setCompanies(snapshot.docs.map(doc => {
-        const data = doc.data();
-        return { id: doc.id, ...data, plan: data.plan || 'free' };
-      }) as Company[]);
-      setLoading(false);
-    }, (error) => {
-      console.error('Error fetching companies:', error);
-      setLoading(false);
-    });
-    return () => unsubscribe();
+  useEffect(() => {
+    loadCompanies();
   }, [userRole]);
 
   const handleAddCompany = async (e: React.FormEvent) => {
@@ -70,51 +69,29 @@ const CompanyManagement: React.FC<CompanyManagementProps> = ({ userRole, onManag
     setError(null);
     try {
       const companyId = Math.random().toString(36).substr(2, 9).toUpperCase();
-      await setDoc(doc(db, 'companies', companyId), {
-        name: newCompany.name,
-        address: newCompany.address,
-        gstin: newCompany.gstin,
-        contactEmail: newCompany.contactEmail,
-        contactPhone: newCompany.contactPhone,
-        ownerEmail: newCompany.ownerEmail.toLowerCase(),
-        plan: newCompany.plan,
-        expiryDate: newCompany.expiryDate ? new Date(newCompany.expiryDate).toISOString() : null,
-        createdAt: serverTimestamp()
+      await localApi.createCompany({
+        id: companyId,
+        ...newCompany,
+        createdAt: new Date().toISOString()
       });
       
-      const trimmedOwnerEmail = newCompany.ownerEmail.trim().toLowerCase();
-      const placeholderId = `invitation_${trimmedOwnerEmail}`;
-      
-      await setDoc(doc(db, 'users', placeholderId), {
-        email: trimmedOwnerEmail,
-        displayName: newCompany.name + ' Admin',
-        role: 'admin',
-        status: 'active',
-        companyId: companyId,
-        createdAt: new Date().toISOString(),
-        isPlaceholder: true
-      }, { merge: true });
-
-      // Send invitation email
-      try {
-        await fetch('/api/send-invitation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: trimmedOwnerEmail,
-            companyName: newCompany.name,
-            role: 'admin',
-            inviteLink: window.location.origin
-          })
+      // Auto-create an invitation/user for the owner if email provided
+      if (newCompany.ownerEmail) {
+        await localApi.signup({
+          username: newCompany.ownerEmail.split('@')[0],
+          password: 'password123', // Default local password
+          email: newCompany.ownerEmail.toLowerCase(),
+          displayName: newCompany.name + ' Admin',
+          role: 'admin',
+          companyId: companyId,
+          status: 'active'
         });
-      } catch (emailErr) {
-        console.error('Error sending invitation email:', emailErr);
       }
 
+      await loadCompanies();
       setShowAddModal(false);
-      setNewCompany({ name: '', address: '', gstin: '', contactEmail: '', contactPhone: '', ownerEmail: '' });
+      setNewCompany({ name: '', address: '', gstin: '', contactEmail: '', contactPhone: '', ownerEmail: '', plan: 'free', expiryDate: '' });
     } catch (err: any) {
-      console.error('Error adding company:', err);
       setError(err.message || 'Failed to add company');
     } finally {
       setSaving(false);
@@ -127,20 +104,11 @@ const CompanyManagement: React.FC<CompanyManagementProps> = ({ userRole, onManag
     setSaving(true);
     setError(null);
     try {
-      await updateDoc(doc(db, 'companies', editingCompany.id), {
-        name: editingCompany.name || '',
-        address: editingCompany.address || '',
-        gstin: editingCompany.gstin || '',
-        contactEmail: editingCompany.contactEmail || '',
-        contactPhone: editingCompany.contactPhone || '',
-        ownerEmail: editingCompany.ownerEmail?.toLowerCase() || '',
-        plan: editingCompany.plan || 'free',
-        expiryDate: editingCompany.expiryDate ? new Date(editingCompany.expiryDate).toISOString() : null
-      });
+      await localApi.updateCompany(editingCompany.id, editingCompany);
+      await loadCompanies();
       setShowEditModal(false);
       setEditingCompany(null);
     } catch (err: any) {
-      console.error('Error updating company:', err);
       setError(err.message || 'Failed to update company');
     } finally {
       setSaving(false);
@@ -158,42 +126,11 @@ const CompanyManagement: React.FC<CompanyManagementProps> = ({ userRole, onManag
     setError(null);
     setIsDeleting(true);
     try {
-      // 1. Find and update all users associated with this company
-      const usersQuery = query(collection(db, 'users'), where('companyId', '==', companyToDelete));
-      const usersSnapshot = await getDocs(usersQuery);
-      const userUpdates = usersSnapshot.docs.map(userDoc => 
-        updateDoc(doc(db, 'users', userDoc.id), {
-          status: 'suspended',
-          companyId: 'NONE',
-          updatedAt: new Date().toISOString()
-        })
-      );
-      
-      // 2. Find and delete all clients associated with this company
-      const clientsQuery = query(collection(db, 'clients'), where('companyId', '==', companyToDelete));
-      const clientsSnapshot = await getDocs(clientsQuery);
-      const clientDeletes = clientsSnapshot.docs.map(d => deleteDoc(doc(db, 'clients', d.id)));
-
-      // 3. Find and delete all products associated with this company
-      const productsQuery = query(collection(db, 'products'), where('companyId', '==', companyToDelete));
-      const productsSnapshot = await getDocs(productsQuery);
-      const productDeletes = productsSnapshot.docs.map(d => deleteDoc(doc(db, 'products', d.id)));
-
-      // 4. Find and delete all quotations associated with this company
-      const quotesQuery = query(collection(db, 'quotations'), where('companyId', '==', companyToDelete));
-      const quotesSnapshot = await getDocs(quotesQuery);
-      const quoteDeletes = quotesSnapshot.docs.map(d => deleteDoc(doc(db, 'quotations', d.id)));
-
-      // Execute all cleanups
-      await Promise.all([...userUpdates, ...clientDeletes, ...productDeletes, ...quoteDeletes]);
-
-      // 5. Finally delete the company document
-      await deleteDoc(doc(db, 'companies', companyToDelete));
-      
+      await localApi.deleteCompany(companyToDelete);
+      await loadCompanies();
       setCompanyToDelete(null);
     } catch (err: any) {
-      console.error('Error during full company cleanup:', err);
-      setError('Failed to delete company: ' + (err.message || 'Permission denied'));
+      setError('Failed to delete company');
     } finally {
       setIsDeleting(false);
     }

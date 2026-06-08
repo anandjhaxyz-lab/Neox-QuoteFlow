@@ -1,12 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, onSnapshot, doc, updateDoc, deleteDoc, where, setDoc, getDocs, getDoc, writeBatch } from 'firebase/firestore';
-import { db, auth } from '../firebase';
-import { Users, UserCheck, UserMinus, Clock, Calendar, Trash2, Search, Plus, ExternalLink, RefreshCw } from 'lucide-react';
+import { localApi } from '../services/localApi';
+import { Users, UserCheck, UserMinus, Clock, Calendar, Trash2, Search, Plus, ExternalLink, RefreshCw, X, Share2, ClipboardCheck } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface AppUser {
   id: string;
   email: string;
+  username: string;
   displayName: string;
   role: 'super_admin' | 'admin' | 'sales';
   status: 'pending' | 'active' | 'suspended' | 'expired';
@@ -29,206 +29,98 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
   const [adding, setAdding] = useState(false);
-  const [showAllCompanies, setShowAllCompanies] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [userToDelete, setUserToDelete] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  
   const [newUser, setNewUser] = useState({
+    username: '',
+    password: '',
     email: '',
     displayName: '',
     role: 'sales' as 'admin' | 'sales',
     companyId: ''
   });
 
+  const loadUsers = async () => {
+    if (!userRole) return;
+    setLoading(true);
+    try {
+      const data = await localApi.getUsers(companyId || 'SUPER');
+      setUsers(data);
+    } catch (error) {
+      console.error('Failed to load users:', error);
+      setErrorMsg('Failed to load users');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    console.log('UserManagement useEffect:', { userRole, companyId });
-    if (!userRole) {
-      setLoading(false);
-      return;
-    }
-    
-    let q;
-    if (companyId === 'SUPER') {
-      q = query(collection(db, 'users'));
-    } else if (companyId) {
-      // For admins, show only their own company members (security rules block global query)
-      q = query(collection(db, 'users'), where('companyId', '==', companyId));
-    } else {
-      console.warn('UserManagement: No companyId for non-super_admin');
-      setLoading(false);
-      return;
-    }
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      console.log('UserManagement snapshot received:', snapshot.size, 'users');
-      const debugEmails = snapshot.docs.map(d => ({ 
-        id: d.id, 
-        email: d.data().email, 
-        displayName: d.data().displayName,
-        status: d.data().status 
-      }));
-      console.log('Users in snapshot details:', debugEmails);
-      
-      let allUsers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as AppUser[];
-      
-      // If not super admin, filter manually to include users in this company OR pending users with matching email
-      if (companyId !== 'SUPER') {
-        allUsers = allUsers.filter(u => u.companyId === companyId || u.status === 'pending');
-      }
-
-      // Filter out duplicates (prefer real users over invitations if both exist)
-      const uniqueUsersMap = new Map<string, AppUser>();
-      allUsers.forEach(u => {
-        // Safety: If email is missing, use ID as fallback for uniqueness
-        const emailLower = (u.email || u.id).toLowerCase();
-        const existing = uniqueUsersMap.get(emailLower);
-        if (!existing || (existing.isPlaceholder && !u.isPlaceholder)) {
-          uniqueUsersMap.set(emailLower, u);
-        }
-      });
-      
-      const finalUsers = Array.from(uniqueUsersMap.values());
-      console.log('Final unique users list:', finalUsers.map(u => u.email || u.id));
-      setUsers(finalUsers);
-      setLoading(false);
-    }, (error) => {
-      console.error('Error fetching users in UserManagement:', error);
-      setLoading(false);
-    });
-    
-    return () => unsubscribe();
-  }, [userRole, companyId, showAllCompanies]);
-
-  const [lastInvitedLink, setLastInvitedLink] = useState<string | null>(null);
+    loadUsers();
+    localApi.getCurrentUser().then(setCurrentUser);
+  }, [userRole, companyId]);
 
   const openAddModal = () => {
     setNewUser({
+      username: '',
+      password: 'password123',
       email: '',
       displayName: '',
       role: 'sales',
-      companyId: (userRole === 'super_admin' && companyId && companyId !== 'SUPER') ? companyId : ''
+      companyId: (userRole === 'super_admin' && companyId && companyId !== 'SUPER') ? companyId : (companyId || '')
     });
-    setLastInvitedLink(null);
     setShowAddModal(true);
   };
 
   const handleAddUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (userRole !== 'super_admin' && (!companyId || companyId === 'NONE')) {
-      setErrorMsg('Error: You must be assigned to a company before you can add team members. Please contact the Super Admin.');
-      return;
-    }
-
-    // Check plan limits
-    const userLimit = plan === 'free' ? 1 : plan === 'basic' ? 3 : plan === 'pro' ? 10 : Infinity;
-    if (userRole !== 'super_admin' && users.length >= userLimit) {
-      setErrorMsg(`User limit reached for ${plan.toUpperCase()} plan (${userLimit} users). Please upgrade to add more.`);
-      return;
-    }
-
     setAdding(true);
+    setErrorMsg(null);
     try {
       const targetCompanyId = userRole === 'super_admin' ? newUser.companyId : companyId;
-      
-      const trimmedEmail = newUser.email.trim().toLowerCase();
-      const placeholderId = `invitation_${trimmedEmail}`;
-      
-      await setDoc(doc(db, 'users', placeholderId), {
-        email: trimmedEmail,
-        displayName: newUser.displayName.trim(),
-        role: newUser.role,
-        status: 'active',
+      await localApi.signup({
+        ...newUser,
         companyId: targetCompanyId,
-        createdAt: new Date().toISOString(),
-        isPlaceholder: true
+        status: 'active'
       });
-
-      // Send invitation email with unique company link
-      const inviteLink = `${window.location.origin}?mode=signup&compId=${targetCompanyId}`;
-      setLastInvitedLink(inviteLink);
-      
-      try {
-        const response = await fetch('/api/send-invitation', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email: trimmedEmail,
-            companyName: companyName,
-            role: newUser.role,
-            inviteLink: inviteLink
-          })
-        });
-
-        if (!response.ok) {
-          const errData = await response.json();
-          console.error('Invitation API error:', errData);
-          setSuccessMsg(`User added! Copy the invite link to send it manually.`);
-        }
-      } catch (emailErr) {
-        console.error('Network error sending invitation email:', emailErr);
-        setSuccessMsg('User added! Copy the invite link below to send it manually.');
-      }
-
+      await loadUsers();
       setShowAddModal(false);
-      setNewUser({ email: '', displayName: '', role: 'sales', companyId: '' });
-    } catch (error) {
-      console.error('Error adding user:', error);
-      alert('Failed to add user. Please check permissions.');
+      setSuccessMsg('User added successfully');
+      setTimeout(() => setSuccessMsg(null), 3000);
+    } catch (error: any) {
+      setErrorMsg(error.message || 'Failed to add user');
     } finally {
       setAdding(false);
     }
   };
 
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [userToDelete, setUserToDelete] = useState<string | null>(null);
-  const [isDeleting, setIsDeleting] = useState(false);
-
   const handleUpdateUser = async (userId: string, updates: Partial<AppUser>) => {
     setErrorMsg(null);
     try {
-      // If Super Admin is changing companyId, move the entire team if the user is an admin
-      if (userRole === 'super_admin' && updates.companyId !== undefined) {
-        const userToUpdate = users.find(u => u.id === userId);
-        const oldCompId = userToUpdate?.companyId;
-
-        if (oldCompId && oldCompId !== 'NONE' && oldCompId !== updates.companyId && userToUpdate?.role === 'admin') {
-          if (window.confirm(`Moving this Admin to a new Company ID (${updates.companyId}). Do you want to move their entire team of ${users.filter(u => u.companyId === oldCompId).length} users as well?`)) {
-            const teamQuery = query(collection(db, 'users'), where('companyId', '==', oldCompId));
-            const teamSnapshot = await getDocs(teamQuery);
-            const batch = writeBatch(db);
-            
-            teamSnapshot.docs.forEach((uDoc) => {
-              if (uDoc.id !== userId) { // Main user updated separately or below
-                batch.update(uDoc.ref, { companyId: updates.companyId });
-              }
-            });
-            await batch.commit();
-          }
-        }
-      }
-
-      await updateDoc(doc(db, 'users', userId), updates);
-      setSuccessMsg(`User ${updates.companyId ? 'moved' : 'updated'} successfully`);
+      await localApi.updateUser(userId, updates);
+      await loadUsers();
+      setSuccessMsg(`User updated successfully`);
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (error: any) {
-      console.error('Error updating user:', error);
-      const errInfo = {
-        error: error.message || String(error),
-        operationType: 'update',
-        path: `users/${userId}`,
-        authInfo: {
-          userId: auth.currentUser?.uid,
-          email: auth.currentUser?.email,
-          role: userRole,
-          companyId: companyId
-        }
-      };
-      console.error('Firestore Error Info:', JSON.stringify(errInfo));
-      setErrorMsg('Failed to update user: ' + (error.message || 'Permission denied'));
+      setErrorMsg('Failed to update user');
     }
   };
 
-  const handleDeleteUser = async (userId: string) => {
-    setUserToDelete(userId);
+  const copyInvite = (user: AppUser) => {
+    const appUrl = window.location.origin;
+    const message = `Hi ${user.displayName || user.username}, \n\nWelcome to QuoteFlow! You can access our quotation system at:\n${appUrl}\n\nYour login details are:\nUsername: ${user.username}\nEmail: ${user.email || 'N/A'}\n\nPlease login and change your password from the 'My Profile' section.\n\nHappy Quotation Making!`;
+    
+    navigator.clipboard.writeText(message);
+    setCopiedId(user.id);
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleDeleteUser = (id: string) => {
+    setUserToDelete(id);
   };
 
   const confirmDeleteUser = async () => {
@@ -237,13 +129,13 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
     setErrorMsg(null);
     setIsDeleting(true);
     try {
-      await deleteDoc(doc(db, 'users', userToDelete));
+      await localApi.deleteUser(userToDelete);
+      await loadUsers();
       setSuccessMsg('User deleted successfully');
       setUserToDelete(null);
       setTimeout(() => setSuccessMsg(null), 3000);
     } catch (error: any) {
-      console.error('Error deleting user:', error);
-      setErrorMsg('Failed to delete user: ' + (error.message || 'Permission denied'));
+      setErrorMsg('Failed to delete user');
     } finally {
       setIsDeleting(false);
     }
@@ -252,57 +144,9 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
   const filteredUsers = users.filter(u => {
     const emailMatch = u.email?.toLowerCase().includes(searchTerm.toLowerCase()) || false;
     const nameMatch = u.displayName?.toLowerCase().includes(searchTerm.toLowerCase()) || false;
-    return emailMatch || nameMatch;
+    const usernameMatch = u.username?.toLowerCase().includes(searchTerm.toLowerCase()) || false;
+    return emailMatch || nameMatch || usernameMatch;
   });
-
-  const [manualEmail, setManualEmail] = useState('');
-  const [activatingManual, setActivatingManual] = useState(false);
-
-  const handleManualActivate = async () => {
-    if (!manualEmail.trim()) return;
-    setActivatingManual(true);
-    setErrorMsg(null);
-    try {
-      const trimmedEmail = manualEmail.trim().toLowerCase();
-      const q = query(collection(db, 'users'), where('email', '==', trimmedEmail));
-      const querySnapshot = await getDocs(q);
-      
-      let userDocRef;
-      let isCreatingPlaceholder = false;
-
-      if (!querySnapshot.empty) {
-        // User exists, update their record
-        userDocRef = doc(db, 'users', querySnapshot.docs[0].id);
-      } else {
-        // User doesn't exist, check for invitation doc or create one
-        const invitationId = `invitation_${trimmedEmail}`;
-        userDocRef = doc(db, 'users', invitationId);
-        isCreatingPlaceholder = true;
-      }
-
-      await setDoc(userDocRef, {
-        email: trimmedEmail,
-        status: 'active',
-        companyId: companyId === 'SUPER' ? 'NONE' : companyId,
-        role: 'admin', // Default to admin for force activation
-        updatedAt: new Date().toISOString(),
-        ...(isCreatingPlaceholder ? {
-          displayName: trimmedEmail.split('@')[0],
-          createdAt: new Date().toISOString(),
-          isPlaceholder: true
-        } : {})
-      }, { merge: true });
-
-      setSuccessMsg(isCreatingPlaceholder ? `Invitation created for ${trimmedEmail}` : `User ${trimmedEmail} activated successfully!`);
-      setManualEmail('');
-      setTimeout(() => setSuccessMsg(null), 3000);
-    } catch (err: any) {
-      console.error('Manual activation error:', err);
-      setErrorMsg('Activation failed: ' + (err.message || 'Permission denied'));
-    } finally {
-      setActivatingManual(false);
-    }
-  };
 
   if (loading) return <div className="h-64 flex items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div></div>;
 
@@ -319,14 +163,15 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+            <Users className="h-7 w-7 text-blue-600" />
             {userRole === 'super_admin' ? 'Global User Management' : 'My Team Management'}
           </h1>
-          <p className="text-gray-500 mt-1">
-            {userRole === 'super_admin' ? 'Manage all users across all companies.' : 'Manage access for your sales team.'}
+          <p className="text-gray-500 mt-1 font-medium">
+            {userRole === 'super_admin' ? 'Manage all local users across the platform.' : 'Manage access for your sales team.'}
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -338,392 +183,276 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
           )}
           <button
             onClick={openAddModal}
-            className="flex items-center justify-center gap-2 bg-blue-600 text-white px-6 py-3 rounded-xl font-semibold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all"
+            className="flex items-center justify-center gap-2 bg-blue-600 text-white px-6 py-3 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all active:scale-95"
           >
             <Plus className="h-5 w-5" />
-            {userRole === 'super_admin' ? 'Add New User' : 'Add Team Member'}
+            {userRole === 'super_admin' ? 'Add Platform User' : 'Add Team Member'}
           </button>
         </div>
       </div>
 
       {errorMsg && (
         <div className="bg-red-50 text-red-600 p-4 rounded-xl border border-red-100 flex justify-between items-center animate-in fade-in slide-in-from-top-2">
-          <p className="text-sm font-medium">{errorMsg}</p>
+          <p className="text-sm font-bold">{errorMsg}</p>
           <button onClick={() => setErrorMsg(null)} className="text-red-500 hover:text-red-700">
-            <Plus className="h-5 w-5 rotate-45" />
+            <X className="h-5 w-5" />
           </button>
         </div>
       )}
 
-      {/* Invite Link Section for Admins */}
-      {userRole === 'admin' && companyId && companyId !== 'NONE' && (
-        <div className="bg-blue-600 p-6 rounded-2xl shadow-lg text-white mb-8 border-b-4 border-blue-800">
-          <div className="flex flex-col lg:flex-row items-center justify-between gap-6">
-            <div className="flex items-center gap-5">
-              <div className="h-14 w-14 bg-white/20 backdrop-blur-md rounded-2xl flex items-center justify-center border border-white/40 shadow-inner">
-                <Plus className="h-8 w-8 text-white" />
-              </div>
-              <div className="space-y-1">
-                <h3 className="text-xl font-bold leading-none">Team Invite Link</h3>
-                <p className="text-blue-100 text-sm font-medium opacity-90">
-                  Share this link with your team members to join <span className="font-bold underline">{companyName}</span>.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 w-full lg:w-auto">
-              <div className="flex-1 lg:min-w-[400px] bg-blue-900/30 backdrop-blur-sm border border-blue-400/40 rounded-xl px-4 py-3 text-sm font-mono text-white truncate shadow-inner">
-                {`${window.location.origin}?mode=signup&compId=${companyId}`}
-              </div>
-              <button
-                onClick={() => {
-                  const link = `${window.location.origin}?mode=signup&compId=${companyId}`;
-                  navigator.clipboard.writeText(link);
-                  setSuccessMsg('Team link copied!');
-                  setTimeout(() => setSuccessMsg(null), 3000);
-                }}
-                className="bg-white text-blue-600 px-5 py-3 rounded-xl font-bold hover:bg-blue-50 transition-all shadow-xl active:scale-95 flex items-center gap-2 shrink-0"
-              >
-                <ExternalLink className="h-5 w-5" />
-                <span>Copy Link</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-
-      {userRole === 'super_admin' && (
-        <div className="flex items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-blue-100 shadow-sm">
-          <div className="flex-1">
-            <label className="block text-xs font-bold text-blue-600 uppercase tracking-widest mb-2">Manual User Activation (Super Admin Only)</label>
+      {/* Global Controls & Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="md:col-span-2 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
             <input
-              type="email"
-              placeholder="Enter user email to force activate..."
-              value={manualEmail}
-              onChange={(e) => setManualEmail(e.target.value)}
-              className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+              type="text"
+              placeholder="Search by name, email, or username..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-gray-50 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 transition-all outline-none"
             />
           </div>
-          <div className="flex gap-2 items-end">
-            <button
-              onClick={handleManualActivate}
-              disabled={activatingManual || !manualEmail}
-              className="bg-blue-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-blue-700 transition-all disabled:opacity-50 whitespace-nowrap"
-            >
-              {activatingManual ? 'Activating...' : 'Force Activate User'}
-            </button>
-            <button
-              onClick={() => window.location.reload()}
-              className="p-2 text-gray-400 hover:text-blue-600 transition-all"
-              title="Refresh List"
-            >
-              <RefreshCw className="h-5 w-5" />
-            </button>
-          </div>
         </div>
-      )}
-
-      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-gray-400" />
-          <input
-            type="text"
-            placeholder="Search users by name or email..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-          />
+        
+        <div className="bg-white px-6 py-4 rounded-2xl border border-gray-100 shadow-sm flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Active Users</p>
+            <h3 className="text-2xl font-black text-gray-900">{users.filter(u => u.status === 'active').length}</h3>
+          </div>
+          <div className="h-10 w-10 bg-green-50 text-green-600 rounded-xl flex items-center justify-center">
+            <UserCheck className="h-5 w-5" />
+          </div>
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-gray-50 border-b border-gray-100">
-              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">User</th>
-              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Role</th>
-              {userRole === 'super_admin' && <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Company ID</th>}
-              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Status</th>
-              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Expiry</th>
-              <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-50">
-            {filteredUsers.map((u) => (
-              <tr key={u.id} className="hover:bg-gray-50 transition-colors">
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-3">
-                    <div className="h-10 w-10 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center font-bold">
-                      {u.displayName ? u.displayName[0].toUpperCase() : (u.email ? u.email[0].toUpperCase() : '?')}
+      {/* Users Table */}
+      <div className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead>
+              <tr className="bg-gray-50/50 border-b border-gray-100">
+                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">User Details</th>
+                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Access Role</th>
+                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Company Status</th>
+                <th className="px-6 py-4 text-xs font-bold text-gray-400 uppercase tracking-widest">Created At</th>
+                <th className="px-6 py-4"></th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-50">
+              {filteredUsers.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-6 py-12 text-center">
+                    <div className="flex flex-col items-center gap-3">
+                      <Users className="h-10 w-10 text-gray-200" />
+                      <p className="text-gray-500 font-medium">No users found matching your search.</p>
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="font-semibold text-gray-900">{u.displayName}</p>
-                        {(u as any).isPlaceholder && (
-                          <span className="px-2 py-0.5 bg-purple-50 text-purple-600 text-[10px] font-bold uppercase tracking-wider rounded-full border border-purple-100">
-                            Invited
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-gray-500">{u.email}</p>
-                      <p className="text-[10px] font-mono text-gray-400 mt-1">UID: {u.id}</p>
-                    </div>
-                  </div>
-                </td>
-                <td className="px-6 py-4">
-                  <select
-                    value={u.role}
-                    disabled={u.email === auth.currentUser?.email}
-                    onChange={(e) => handleUpdateUser(u.id, { role: e.target.value as any })}
-                    className="text-sm border-none bg-transparent focus:ring-0 font-medium text-gray-700 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {userRole === 'super_admin' && <option value="super_admin">Super Admin</option>}
-                    <option value="admin">Admin</option>
-                    <option value="sales">Sales</option>
-                  </select>
-                </td>
-                {userRole === 'super_admin' && (
-                  <td className="px-6 py-4">
-                    <input
-                      type="text"
-                      defaultValue={u.companyId || ''}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          handleUpdateUser(u.id, { companyId: e.currentTarget.value });
-                          e.currentTarget.blur();
-                        }
-                      }}
-                      onBlur={(e) => {
-                        if (e.target.value !== (u.companyId || '')) {
-                          handleUpdateUser(u.id, { companyId: e.target.value });
-                        }
-                      }}
-                      placeholder="Assign Company ID"
-                      className="text-xs font-mono bg-gray-50 border border-gray-100 rounded px-2 py-1 w-24 focus:ring-1 focus:ring-blue-500 outline-none transition-all focus:bg-white focus:border-blue-200"
-                    />
                   </td>
-                )}
-                <td className="px-6 py-4">
-                  {u.isPlaceholder ? (
-                    <div className="flex flex-col gap-1">
-                      <span className="text-xs font-bold uppercase tracking-widest px-3 py-1 rounded-full bg-purple-50 text-purple-600 border border-purple-100 w-fit">
-                        Invitation Sent
-                      </span>
-                      <button 
-                        onClick={() => {
-                          const link = `${window.location.origin}?mode=signup&compId=${u.companyId}`;
-                          navigator.clipboard.writeText(link);
-                          setSuccessMsg('Join link copied!');
-                          setTimeout(() => setSuccessMsg(null), 3000);
-                        }}
-                        className="text-[10px] text-purple-500 hover:text-purple-700 font-medium underline flex items-center gap-1"
+                </tr>
+              ) : (
+                filteredUsers.map((u) => (
+                  <tr key={u.id} className="hover:bg-gray-50/50 transition-colors group">
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-3">
+                        <div className="h-10 w-10 bg-blue-50 text-blue-600 rounded-xl flex items-center justify-center font-bold text-sm shadow-inner group-hover:bg-blue-100 transition-colors">
+                          {(u.displayName || u.username || 'U')[0].toUpperCase()}
+                        </div>
+                        <div>
+                          <div className="font-bold text-gray-900 flex items-center gap-2">
+                            {u.displayName || u.username}
+                            {u.isPlaceholder && (
+                              <span className="px-1.5 py-0.5 bg-purple-50 text-purple-600 text-[10px] font-bold rounded uppercase tracking-tighter">Invite Sent</span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-400 font-medium">{u.email || u.username}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <select
+                        value={u.role}
+                        onChange={(e) => handleUpdateUser(u.id, { role: e.target.value as any })}
+                        disabled={u.id === currentUser?.id}
+                        className="text-xs font-bold bg-transparent border-none focus:ring-0 text-gray-600 cursor-pointer disabled:opacity-50"
                       >
-                        <ExternalLink className="h-2.5 w-2.5" />
-                        Copy Join Link
-                      </button>
-                    </div>
-                  ) : (
-                    <select
-                      value={u.status}
-                      disabled={u.email === auth.currentUser?.email}
-                      onChange={(e) => handleUpdateUser(u.id, { status: e.target.value as any })}
-                      className={cn(
-                        "text-xs font-bold uppercase tracking-widest px-3 py-1 rounded-full border-none focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
-                        u.status === 'active' ? "bg-green-50 text-green-600" :
-                        u.status === 'pending' ? "bg-yellow-50 text-yellow-600" :
-                        u.status === 'suspended' ? "bg-red-50 text-red-600" :
-                        "bg-gray-50 text-gray-600"
-                      )}
-                    >
-                      <option value="pending">Pending</option>
-                      <option value="active">Active</option>
-                      <option value="suspended">Suspended</option>
-                      <option value="expired">Expired</option>
-                    </select>
-                  )}
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-2">
-                    <Calendar className="h-4 w-4 text-gray-400" />
-                    <input
-                      type="date"
-                      value={u.expiryDate ? u.expiryDate.split('T')[0] : ''}
-                      onChange={(e) => handleUpdateUser(u.id, { expiryDate: e.target.value ? new Date(e.target.value).toISOString() : null })}
-                      className="text-xs border-none bg-transparent focus:ring-0 text-gray-600 cursor-pointer"
-                    />
-                  </div>
-                </td>
-                <td className="px-6 py-4 text-right">
-                  <div className="flex items-center justify-end gap-2">
-                    {u.email !== auth.currentUser?.email && (
-                      <>
-                        {(u as any).isPlaceholder && (
-                          <button
-                            onClick={() => {
-                              const inviteLink = `${window.location.origin}?mode=signup&compId=${u.companyId}`;
-                              navigator.clipboard.writeText(inviteLink);
-                              setSuccessMsg('Invite link copied to clipboard!');
-                              setTimeout(() => setSuccessMsg(null), 3000);
-                            }}
-                            className="p-2 text-purple-600 hover:bg-purple-50 rounded-lg transition-colors"
-                            title="Copy Invite Link"
+                        <option value="admin">Admin</option>
+                        <option value="sales">Sales Team</option>
+                        {userRole === 'super_admin' && <option value="super_admin">Super Admin</option>}
+                      </select>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <div className={cn("h-1.5 w-1.5 rounded-full", 
+                            u.status === 'active' ? "bg-green-500" : 
+                            u.status === 'suspended' ? "bg-red-500" : "bg-orange-500"
+                          )}></div>
+                          <select
+                            value={u.status}
+                            onChange={(e) => handleUpdateUser(u.id, { status: e.target.value as any })}
+                            className="text-xs font-bold bg-transparent border-none focus:ring-0 text-gray-600 cursor-pointer"
                           >
-                            <ExternalLink className="h-5 w-5" />
-                          </button>
-                        )}
-                        {u.status === 'pending' && (
-                          <button
-                            onClick={() => {
-                              if (window.confirm(`Are you sure you want to reset ${u.displayName || u.email} to company setup?`)) {
-                                handleUpdateUser(u.id, { status: 'active', companyId: 'NONE', role: 'admin' });
-                              }
-                            }}
-                            className="flex items-center gap-1 px-3 py-1 bg-blue-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-blue-700 transition-all shadow-sm"
-                            title="Reset to Company Setup"
-                          >
-                            <RefreshCw className="h-3 w-3" />
-                            Reset
-                          </button>
-                        )}
-                        {u.status === 'pending' && (
-                          <button
-                            onClick={() => handleUpdateUser(u.id, { status: 'active' })}
-                            className="flex items-center gap-1 px-3 py-1 bg-green-600 text-white text-[10px] font-bold uppercase tracking-widest rounded-lg hover:bg-green-700 transition-all shadow-sm"
-                          >
-                            <UserCheck className="h-3 w-3" />
-                            Approve
-                          </button>
-                        )}
+                            <option value="active">Active</option>
+                            <option value="suspended">Suspended</option>
+                            <option value="pending">Pending</option>
+                          </select>
+                        </div>
+                        <div className="text-[10px] font-mono text-gray-400 pl-3">
+                          {u.companyId || 'NONE'}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-1.5 text-xs text-gray-500 font-medium">
+                        <Calendar className="h-3 w-3" />
+                        {u.createdAt ? new Date(u.createdAt).toLocaleDateString() : 'N/A'}
+                      </div>
+                    </td>
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex items-center justify-end gap-1">
                         <button
-                          onClick={() => handleUpdateUser(u.id, { status: u.status === 'active' ? 'suspended' : 'active' })}
+                          onClick={() => copyInvite(u)}
                           className={cn(
-                            "p-2 rounded-lg transition-colors",
-                            u.status === 'active' ? "text-red-600 hover:bg-red-50" : "text-green-600 hover:bg-green-50"
+                            "p-2 rounded-xl transition-all flex items-center gap-1",
+                            copiedId === u.id ? "text-green-600 bg-green-50" : "text-gray-400 hover:text-blue-600 hover:bg-blue-50"
                           )}
-                          title={u.status === 'active' ? "Suspend User" : "Activate User"}
+                          title="Copy Invite Message"
                         >
-                          {u.status === 'active' ? <UserMinus className="h-5 w-5" /> : <UserCheck className="h-5 w-5" />}
+                          {copiedId === u.id ? <ClipboardCheck className="h-5 w-5" /> : <Share2 className="h-5 w-5" />}
+                          {copiedId === u.id && <span className="text-[10px] font-bold">Copied</span>}
                         </button>
-                        {(userRole === 'super_admin' || (userRole === 'admin' && u.companyId === companyId)) && (
+                        {u.id !== currentUser?.id && (
                           <button
                             onClick={() => handleDeleteUser(u.id)}
-                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all"
                             title="Delete User"
                           >
                             <Trash2 className="h-5 w-5" />
                           </button>
                         )}
-                      </>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Add User Modal */}
       {showAddModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
-            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-              <h2 className="text-xl font-bold text-gray-900">
-                {userRole === 'super_admin' ? 'Add New User' : 'Add Team Member'}
-              </h2>
-              <button onClick={() => {
-                setShowAddModal(false);
-                setLastInvitedLink(null);
-              }} className="text-gray-400 hover:text-gray-600">
-                <Plus className="h-6 w-6 rotate-45" />
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border border-gray-100">
+            <div className="p-6 border-b border-gray-50 flex justify-between items-center bg-gray-50/50">
+              <div className="flex items-center gap-3">
+                <div className="h-10 w-10 bg-blue-600 text-white rounded-xl flex items-center justify-center shadow-lg shadow-blue-100">
+                  <Plus className="h-6 w-6" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-gray-900">Add New User</h2>
+                  <p className="text-xs text-gray-500 font-medium">Create a new local account.</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowAddModal(false)}
+                className="p-2 hover:bg-gray-100 rounded-xl transition-colors text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
               </button>
             </div>
-            <form onSubmit={handleAddUser} className="p-6 space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Full Name</label>
-                <input
-                  required
-                  type="text"
-                  value={newUser.displayName}
-                  onChange={e => setNewUser({...newUser, displayName: e.target.value})}
-                  placeholder="John Doe"
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
-                />
+            
+            <form onSubmit={handleAddUser} className="p-8 space-y-5">
+              <div className="grid grid-cols-2 gap-5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Username</label>
+                  <input
+                    required
+                    type="text"
+                    value={newUser.username}
+                    onChange={e => setNewUser({...newUser, username: e.target.value})}
+                    placeholder="john.doe"
+                    className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Display Name</label>
+                  <input
+                    required
+                    type="text"
+                    value={newUser.displayName}
+                    onChange={e => setNewUser({...newUser, displayName: e.target.value})}
+                    placeholder="John Doe"
+                    className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Email Address</label>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Email (Optional)</label>
                 <input
-                  required
                   type="email"
                   value={newUser.email}
                   onChange={e => setNewUser({...newUser, email: e.target.value})}
                   placeholder="john@example.com"
-                  className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                  className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Role</label>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Password</label>
+                <input
+                  required
+                  type="password"
+                  value={newUser.password}
+                  onChange={e => setNewUser({...newUser, password: e.target.value})}
+                  className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-medium"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-5">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Role</label>
                   <select
                     value={newUser.role}
                     onChange={e => setNewUser({...newUser, role: e.target.value as any})}
-                    className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                    className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-bold text-gray-700"
                   >
-                    <option value="sales">Sales</option>
+                    <option value="sales">Sales Team</option>
                     <option value="admin">Admin</option>
+                    {userRole === 'super_admin' && <option value="super_admin">Super Admin</option>}
                   </select>
                 </div>
-                {userRole === 'super_admin' && (
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1">Company ID</label>
-                    <input
-                      required
-                      type="text"
-                      value={newUser.companyId}
-                      onChange={e => setNewUser({...newUser, companyId: e.target.value})}
-                      placeholder="COMP123"
-                      className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm"
-                    />
-                  </div>
-                )}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-gray-400 uppercase tracking-widest ml-1">Company ID</label>
+                  <input
+                    required={userRole === 'super_admin'}
+                    disabled={userRole !== 'super_admin'}
+                    type="text"
+                    value={newUser.companyId}
+                    onChange={e => setNewUser({...newUser, companyId: e.target.value})}
+                    placeholder="ACME-123"
+                    className="w-full px-4 py-3 rounded-2xl bg-gray-50 border-none focus:ring-2 focus:ring-blue-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
+                  />
+                </div>
               </div>
+
               <div className="pt-4">
                 <button
                   type="submit"
                   disabled={adding}
-                  className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-blue-100 hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                  className="w-full bg-blue-600 text-white py-4 rounded-2xl font-bold shadow-xl shadow-blue-100 hover:bg-blue-700 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
                 >
-                  {adding && <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>}
-                  {adding ? 'Adding...' : 'Add User'}
+                  {adding ? (
+                    <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                  ) : (
+                    <>
+                      <Plus className="h-5 w-5" />
+                      Create Account
+                    </>
+                  )}
                 </button>
               </div>
-              {lastInvitedLink && (
-                <div className="mt-4 p-4 bg-purple-50 rounded-xl border border-purple-100 animate-in zoom-in-95">
-                  <p className="text-xs font-bold text-purple-600 uppercase tracking-widest mb-2">Invitation Created!</p>
-                  <p className="text-xs text-gray-600 mb-3">Email might take a moment. You can also copy this link and send it manually:</p>
-                  <div className="flex items-center gap-2">
-                    <input 
-                      readOnly 
-                      value={lastInvitedLink}
-                      className="flex-1 bg-white border border-purple-200 rounded-lg px-3 py-2 text-xs font-mono text-purple-700"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(lastInvitedLink);
-                        setSuccessMsg('Link copied!');
-                        setTimeout(() => setSuccessMsg(null), 2000);
-                      }}
-                      className="p-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all"
-                    >
-                      <ExternalLink className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              )}
-              <p className="text-[10px] text-gray-400 text-center italic">
-                The user will be automatically assigned when they login with this email.
-              </p>
             </form>
           </div>
         </div>
@@ -731,25 +460,32 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
 
       {/* Delete Confirmation Modal */}
       {userToDelete && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl">
-            <h3 className="text-xl font-bold text-gray-900 mb-2">Delete User</h3>
-            <p className="text-gray-500 mb-6">Are you sure you want to delete this user? This action cannot be undone.</p>
-            <div className="flex justify-end gap-3">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-300">
+          <div className="bg-white rounded-3xl p-8 max-w-sm w-full shadow-2xl border border-red-50 text-center">
+            <div className="h-16 w-16 bg-red-50 text-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+              <Trash2 className="h-8 w-8" />
+            </div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">Delete User Account?</h3>
+            <p className="text-gray-500 text-sm mb-8 font-medium">
+              Are you sure? This action will permanently remove this user and they will no longer be able to log in.
+            </p>
+            <div className="flex gap-3">
               <button
                 onClick={() => setUserToDelete(null)}
-                className="px-4 py-2 text-gray-600 font-medium hover:bg-gray-50 rounded-lg transition-colors"
-                disabled={isDeleting}
+                className="flex-1 px-4 py-3 text-gray-600 font-bold hover:bg-gray-50 rounded-2xl transition-all active:scale-95"
               >
                 Cancel
               </button>
               <button
                 onClick={confirmDeleteUser}
                 disabled={isDeleting}
-                className="px-4 py-2 bg-red-600 text-white font-medium hover:bg-red-700 rounded-lg transition-colors flex items-center gap-2"
+                className="flex-1 px-4 py-3 bg-red-600 text-white font-bold hover:bg-red-700 rounded-2xl shadow-lg shadow-red-100 transition-all active:scale-95 flex items-center justify-center gap-2"
               >
-                {isDeleting && <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-white"></div>}
-                {isDeleting ? 'Deleting...' : 'Delete'}
+                {isDeleting ? (
+                  <div className="h-4 w-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                ) : (
+                  'Delete User'
+                )}
               </button>
             </div>
           </div>
@@ -760,4 +496,3 @@ const UserManagement: React.FC<UserManagementProps> = ({ userRole, companyId, pl
 };
 
 export default UserManagement;
-

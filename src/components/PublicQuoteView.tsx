@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { doc, getDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { localApi } from '../services/localApi';
 import QuoteDisplay from './QuoteDisplay';
 import { ArrowLeft, FileText } from 'lucide-react';
 
@@ -17,17 +16,16 @@ const PublicQuoteView: React.FC<PublicQuoteViewProps> = ({ quoteId, onBack }) =>
   useEffect(() => {
     const fetchQuote = async () => {
       try {
-        const docRef = doc(db, 'quotations', quoteId);
-        const docSnap = await getDoc(docRef);
+        const data = await localApi.getQuotation(quoteId);
         
-        if (docSnap.exists()) {
-          setQuoteData(docSnap.data());
+        if (data) {
+          setQuoteData(data);
         } else {
           setError('Quotation not found');
         }
       } catch (err: any) {
         console.error('Error fetching public quote:', err);
-        setError('You do not have permission to view this quotation or it does not exist.');
+        setError('Error loading quotation. Please check your connection.');
       } finally {
         setLoading(false);
       }

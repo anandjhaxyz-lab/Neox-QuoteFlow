@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, query, orderBy, onSnapshot, deleteDoc, doc, addDoc, getDoc, where, runTransaction } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { Plus, Search, FileText, Download, Edit2, Copy, Trash2, MoreVertical, ExternalLink, Eye, BarChart3, PieChart as PieChartIcon, TrendingUp, Share2 } from 'lucide-react';
 import { formatCurrency, cn } from '../lib/utils';
 import { 
@@ -40,70 +39,39 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, companyId, onNewQuote, 
   const [filterPayment, setFilterPayment] = useState<string>('All');
   const [quoteToDelete, setQuoteToDelete] = useState<string | null>(null);
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
-  const [showAllCompanies, setShowAllCompanies] = useState(false);
 
-  useEffect(() => {
-    if (!userRole || (!companyId && userRole !== 'super_admin')) return;
-
-    if (userRole === 'admin' || userRole === 'super_admin') {
-      let q = query(collection(db, 'users'));
-      if (userRole === 'admin') {
-        q = query(collection(db, 'users'), where('companyId', '==', companyId));
-      }
+  const loadData = async () => {
+    if (!userRole || (!companyId && userRole !== 'super_admin')) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [quotes, users] = await Promise.all([
+        localApi.getQuotations(companyId || 'SUPER'),
+        userRole === 'admin' || userRole === 'super_admin' ? localApi.getUsers(companyId || 'SUPER') : Promise.resolve([])
+      ]);
       
-      const unsubscribeUsers = onSnapshot(q, (snapshot) => {
-        const uMap: Record<string, string> = {};
-        snapshot.forEach(doc => {
-          const data = doc.data();
-          uMap[doc.id] = data.displayName || data.email || 'Unknown User';
+      const uMap: Record<string, string> = {};
+      if (Array.isArray(users)) {
+        users.forEach((u: any) => {
+          uMap[u.id] = u.displayName || u.username || 'Unknown';
         });
-        setUsersMap(uMap);
-      }, (error) => {
-        console.error('Error fetching users in Dashboard:', error);
-      });
-      return () => unsubscribeUsers();
+      }
+      setUsersMap(uMap);
+      
+      const safeQuotes = Array.isArray(quotes) ? quotes : [];
+      setQuotations(safeQuotes.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+    } catch (error) {
+      console.error('Dashboard load failed:', error);
+    } finally {
+      setLoading(false);
     }
-  }, [userRole, companyId]);
+  };
 
   useEffect(() => {
-    if (!userRole || (!companyId && userRole !== 'super_admin')) return;
-
-    let q;
-    
-    if (companyId === 'SUPER') {
-      q = query(collection(db, 'quotations'));
-    } else {
-      q = query(collection(db, 'quotations'), where('companyId', '==', companyId));
-    }
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      let quotes = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Quotation[];
-      
-      // Sort in memory for all roles
-      quotes = quotes.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      
-      setQuotations(quotes);
-      setLoading(false);
-    }, (error) => {
-      console.error('Error fetching quotations:', error);
-      const errInfo = {
-        error: error.message,
-        operationType: 'list',
-        path: 'quotations',
-        authInfo: {
-          userId: auth.currentUser?.uid,
-          email: auth.currentUser?.email
-        }
-      };
-      console.error('Firestore Error Info:', JSON.stringify(errInfo));
-      setLoading(false);
-    });
-
-    return () => unsubscribe();
-  }, [userRole, companyId, showAllCompanies]);
+    loadData();
+  }, [userRole, companyId]);
 
   const handleDelete = async (id: string) => {
     setQuoteToDelete(id);
@@ -112,7 +80,8 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, companyId, onNewQuote, 
   const confirmDelete = async () => {
     if (quoteToDelete) {
       try {
-        await deleteDoc(doc(db, 'quotations', quoteToDelete));
+        await localApi.deleteQuotation(quoteToDelete);
+        await loadData();
         setQuoteToDelete(null);
       } catch (error) {
         console.error('Delete failed:', error);
@@ -122,36 +91,8 @@ const Dashboard: React.FC<DashboardProps> = ({ userRole, companyId, onNewQuote, 
 
   const handleDuplicate = async (id: string) => {
     try {
-      const quoteDoc = await getDoc(doc(db, 'quotations', id));
-      if (quoteDoc.exists()) {
-        const data = quoteDoc.data();
-        
-        await runTransaction(db, async (transaction) => {
-          const counterRef = doc(db, 'counters', `${companyId}_quotations`);
-          const counterDoc = await transaction.get(counterRef);
-          
-          let nextNumber = 101;
-          if (counterDoc.exists()) {
-            nextNumber = counterDoc.data().lastNumber + 1;
-          }
-          
-          const finalQuoteNumber = `Q-${nextNumber}`;
-          
-          // Update the counter
-          transaction.set(counterRef, { lastNumber: nextNumber }, { merge: true });
-          
-          // Create the duplicated quote
-          const newQuoteRef = doc(collection(db, 'quotations'));
-          transaction.set(newQuoteRef, {
-            ...data,
-            quoteNumber: finalQuoteNumber,
-            date: new Date().toISOString().split('T')[0],
-            status: 'Draft',
-            createdBy: auth.currentUser?.uid,
-            createdAt: new Date().toISOString()
-          });
-        });
-      }
+      await localApi.duplicateQuotation(id);
+      await loadData();
     } catch (error) {
       console.error('Duplicate failed:', error);
     }

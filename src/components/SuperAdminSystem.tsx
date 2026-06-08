@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, onSnapshot, getDocs, doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { localApi } from '../services/localApi';
 import { 
   Shield, Users, Building2, FileText, TrendingUp, 
   Mail, Phone, User, Settings, Save, CheckCircle2,
@@ -25,80 +24,83 @@ const SuperAdminSystem: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'profile' | 'activity' | 'settings'>('overview');
   const [adminProfile, setAdminProfile] = useState({
+    id: '',
     displayName: '',
     email: '',
+    username: '',
     phone: '',
     designation: 'Super Administrator',
     bio: ''
   });
-  const [recentActivity, setRecentActivity] = useState<any[]>([]);
   const [saving, setSaving] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
 
-  const [configStatus, setConfigStatus] = useState({ resendConfigured: false, firebaseConfigured: false });
+  const [configStatus, setConfigStatus] = useState({ resendConfigured: false });
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const configRes = await fetch('/api/check-config');
+      const configData = await configRes.json();
+      setConfigStatus(configData);
+
+      const [companies, users, quotes, currentUser] = await Promise.all([
+        localApi.getCompanies(),
+        localApi.getUsers('SUPER'),
+        localApi.getQuotations('SUPER'),
+        localApi.getCurrentUser()
+      ]);
+      
+      let revenue = 0;
+      quotes.forEach((q: any) => {
+        if (q.status === 'Accepted') {
+          revenue += (q.grandTotal || 0);
+        }
+      });
+
+      setStats({
+        totalCompanies: companies.length,
+        totalUsers: users.length,
+        totalQuotes: quotes.length,
+        totalRevenue: revenue
+      });
+
+      if (currentUser) {
+        setAdminProfile({
+          id: currentUser.id,
+          displayName: currentUser.displayName || '',
+          email: currentUser.email || '',
+          username: currentUser.username || '',
+          phone: currentUser.phone || '',
+          designation: currentUser.designation || 'Super Administrator',
+          bio: currentUser.bio || ''
+        });
+      }
+
+      setLoading(false);
+    } catch (error) {
+      console.error('Error fetching system data:', error);
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    // Fetch Global Stats
-    const fetchData = async () => {
-      try {
-        const configRes = await fetch('/api/check-config');
-        const configData = await configRes.json();
-        setConfigStatus(configData);
-
-        const companiesSnap = await getDocs(collection(db, 'companies'));
-        const usersSnap = await getDocs(collection(db, 'users'));
-        const quotesSnap = await getDocs(collection(db, 'quotations'));
-        
-        let revenue = 0;
-        quotesSnap.forEach(doc => {
-          const data = doc.data();
-          if (data.status === 'Accepted') {
-            revenue += (data.grandTotal || 0);
-          }
-        });
-
-        setStats({
-          totalCompanies: companiesSnap.size,
-          totalUsers: usersSnap.size,
-          totalQuotes: quotesSnap.size,
-          totalRevenue: revenue
-        });
-
-        // Fetch Admin Profile
-        if (auth.currentUser) {
-          const adminDoc = await getDoc(doc(db, 'users', auth.currentUser.uid));
-          if (adminDoc.exists()) {
-            const data = adminDoc.data();
-            setAdminProfile({
-              displayName: data.displayName || '',
-              email: data.email || auth.currentUser.email || '',
-              phone: data.phone || '',
-              designation: data.designation || 'Super Administrator',
-              bio: data.bio || ''
-            });
-          }
-        }
-
-        setLoading(false);
-      } catch (error) {
-        console.error('Error fetching system data:', error);
-        setLoading(false);
-      }
-    };
-
     fetchData();
   }, []);
 
   const handleSaveProfile = async () => {
-    if (!auth.currentUser) return;
+    if (!adminProfile.id) return;
     setSaving(true);
     try {
-      await updateDoc(doc(db, 'users', auth.currentUser.uid), {
-        ...adminProfile,
-        updatedAt: new Date().toISOString()
+      await localApi.updateUser(adminProfile.id, {
+        displayName: adminProfile.displayName,
+        phone: adminProfile.phone,
+        designation: adminProfile.designation,
+        bio: adminProfile.bio
       });
       setShowSuccess(true);
       setTimeout(() => setShowSuccess(false), 3000);
+      await fetchData();
     } catch (error) {
       console.error('Error saving admin profile:', error);
     } finally {
@@ -238,14 +240,14 @@ const SuperAdminSystem: React.FC = () => {
                 <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></div>
-                    <span className="text-sm font-medium text-gray-700">Database Connection</span>
+                    <span className="text-sm font-medium text-gray-700">Database Connection (Local JSON)</span>
                   </div>
                   <span className="text-xs font-bold text-green-600 uppercase">Operational</span>
                 </div>
                 <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
                   <div className="flex items-center gap-3">
                     <div className="h-2 w-2 bg-green-500 rounded-full animate-pulse"></div>
-                    <span className="text-sm font-medium text-gray-700">Auth Service</span>
+                    <span className="text-sm font-medium text-gray-700">Internal Auth Service</span>
                   </div>
                   <span className="text-xs font-bold text-green-600 uppercase">Operational</span>
                 </div>

@@ -115,19 +115,29 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read: if (userId.startsWith('invitation_')) || (isAuthenticated() && (
-        request.auth.uid == userId || 
-        resource.data.get('email', '').lower() == getAuthEmail() ||
-        isSuperAdmin() || 
-        (hasRole('admin') && getEffectiveCompanyId() == resource.data.get('companyId', 'NONE'))
-      ));
-      allow create: if isAuthenticated() && (
+      allow read: if (userId.startsWith('invitation_')) || 
+                  (resource != null && resource.data.get('isPlaceholder', false) == true) ||
+                  (isAuthenticated() && (
+                    request.auth.uid == userId || 
+                    resource.data.get('email', '').lower() == getAuthEmail() ||
+                    isSuperAdmin() || 
+                    (hasRole('admin') && getEffectiveCompanyId() == resource.data.get('companyId', 'NONE'))
+                  ));
+      
+      allow list: if (isAuthenticated() && (isSuperAdmin() || hasRole('admin'))) ||
+                    // Allow public search for invitations by email
+                    (request.query.limit <= 10 && (
+                      resource.data.get('isPlaceholder', false) == true || 
+                      resource.id.startsWith('invitation_')
+                    ));
+
+      allow create: if (isAuthenticated() && (
         (request.auth.uid == userId && request.resource.data.get('role', 'sales') != 'super_admin') || 
         isSuperAdmin() || 
         (hasRole('admin') && request.resource.data.get('companyId', 'NONE') == getEffectiveCompanyId() && request.resource.data.get('role', 'sales') != 'super_admin') ||
         // Allow creating invitation
         (userId.startsWith('invitation_') && hasRole('admin'))
-      );
+      ));
       allow update: if isSuperAdmin() || 
                     (hasRole('admin') && 
                      getEffectiveCompanyId() == resource.data.get('companyId', 'NONE') && 
